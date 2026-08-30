@@ -15,8 +15,9 @@ import { doctor } from './commands/doctor.mjs';
 import { release, retain } from './commands/lifecycle.mjs';
 import { heartbeat, ask, escalate, check, reply, send } from './commands/messaging.mjs';
 import { trust } from './commands/trust.mjs';
+import { contract } from './commands/contract.mjs';
 
-export const VERSION = '1.2.1';
+export const VERSION = '1.3.0';
 
 /** Flags accepted by every command. */
 const GLOBAL_FLAGS = {
@@ -74,6 +75,7 @@ const TREE = {
   reply,
   send,
   trust,
+  contract,
 };
 
 const isCommand = (node) => node && typeof node.run === 'function';

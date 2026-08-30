@@ -74,6 +74,29 @@ cbds dispatch start --task $B --agent codex  --json
 cbds wait --all --timeout 900000 --json      # both, in one blocking call
 ```
 
+### Right-sizing the contract (do not send a wall of protocol for a one-line task)
+
+Every dispatch injects a preamble teaching the worker how to report. How much of the
+protocol travels is your call:
+
+| `--contract` | ~tokens | Use it for |
+|---|---|---|
+| `minimal` | ~200 | trivial work: a greeting, a one-line check, a connectivity test |
+| `standard` *(default)* | ~380 | almost everything |
+| `full` | ~1100 | long autonomous work where you want heartbeats, `ask` and `escalate` used properly |
+
+```bash
+cbds dispatch start --task <id> --agent claude --contract minimal
+```
+
+**Nothing is lost by going compact.** Every level carries the rules a correct report
+depends on — the three outcomes, exactly-once, never-use-your-own-UI, stop-after —
+and points the worker at `cbds contract`, which prints the full protocol on demand.
+The optional verbs are *pulled*, not pushed.
+
+Rule of thumb: if the task spec is shorter than the protocol, the protocol is too big.
+A one-line task under `full` is ~178x more protocol than work.
+
 ### Choosing the model and effort per worker
 
 Each worker is launched independently, so you pick the right agent **and** the right
@@ -252,6 +275,16 @@ cbds whoami
 This check exists because a preamble is just text: it can be scrolled back to, copied,
 or inherited. Your environment (`CBDS_TASK_ID`, `CBDS_DISPATCH_ID`) is what actually
 makes you a worker.
+
+### If you need more than `done`
+
+Your preamble carries only what you need to report correctly. For the rest — sending
+heartbeats, asking the coordinator a blocking question, escalating a blocker, reading
+follow-up mail — run:
+
+```bash
+cbds contract
+```
 
 ### While you work
 

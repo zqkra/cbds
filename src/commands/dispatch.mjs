@@ -8,7 +8,7 @@ import {
 import { resolveRun, resolveTaskId, resolveDispatchId } from '../core/context.mjs';
 import { agentNameForDispatch } from '../core/ids.mjs';
 import { appendEvent } from '../core/store.mjs';
-import { buildPreamble, sha256, workerEnv } from '../herdr/preamble.mjs';
+import { buildPreamble, sha256, workerEnv, CONTRACT_LEVELS } from '../herdr/preamble.mjs';
 import { buildAgentArgs, launchKinds } from '../herdr/launch.mjs';
 import {
   paneSplit, agentStart, agentPrompt, paneLayout, paneGet, paintPane, insideHerdr, callerPane,
@@ -53,6 +53,7 @@ export const start = {
     'wait-ready': { type: 'number', default: 0, placeholder: 'ms', describe: 'if the agent starts blocked (e.g. a trust dialog), wait this long for a human to clear it' },
     trust: { type: 'boolean', describe: 'pre-trust --cwd for this agent first, so it cannot stall on a directory-trust dialog' },
     'no-agent': { type: 'boolean', describe: 'create the pane with cbds env but start no agent (bare-shell dispatch)' },
+    contract: { type: 'string', default: 'standard', describe: `how much protocol to inject: ${CONTRACT_LEVELS.join('|')} (the worker pulls the rest with \`cbds contract\`)` },
     'keep-pane-on-failure': { type: 'boolean', describe: 'leave the worker pane open when the launch fails, for debugging' },
     'dry-run': { type: 'boolean', describe: 'print the preamble and plan without touching Herdr' },
   },
@@ -141,20 +142,33 @@ export const start = {
     // after reporting (no prompt to reuse), an agent must idle and stay reusable.
     // The sub-dispatch section is omitted entirely unless nesting is actually
     // allowed — a worker told it "usually cannot" delegate still tries.
+    const contractLevel = oneOf(ctx.flags.contract, CONTRACT_LEVELS, 'contract');
     const preamble = buildPreamble({
       run, task, dispatch,
       workerKind: bareShell ? 'bare-shell' : 'agent',
-      canDispatchSubWorkers: depth + 1 < ctx.flags['max-depth'],
+      contract: contractLevel,
+      // Sub-dispatch only exists in the full contract; at the compact levels the
+      // worker learns about it from `cbds contract` if it ever needs to.
+      canDispatchSubWorkers: contractLevel === 'full' && depth + 1 < ctx.flags['max-depth'],
     });
     dispatch.preamble_sha256 = sha256(preamble);
+    dispatch.contract = contractLevel;
 
     if (ctx.flags['dry-run']) {
       say(ctx, c.dim('── dry run: nothing was created ──'));
       say(ctx, preamble);
-      say(ctx, c.dim(`\nwould split ${ctx.flags.direction ?? 'auto'} from ${callerPane().pane_id ?? 'the focused pane'} and start agent kind "${agentKind}"`));
+      say(ctx, c.dim(`\ncontract: ${contractLevel} (~${Math.round(Buffer.byteLength(preamble) / 4)} tokens injected)`));
+      say(ctx, c.dim(`would split ${ctx.flags.direction ?? 'auto'} from ${callerPane().pane_id ?? 'the focused pane'} and start agent kind "${agentKind ?? 'none'}"`));
       // A dry run must leave no trace, so the speculative record is withdrawn.
       supersedeDispatch(store, dispatch, 'dry run');
-      return emit(ctx, { dry_run: true, preamble, preamble_sha256: dispatch.preamble_sha256, dispatch });
+      return emit(ctx, {
+        dry_run: true,
+        preamble,
+        contract: contractLevel,
+        preamble_tokens_approx: Math.round(Buffer.byteLength(preamble) / 4),
+        preamble_sha256: dispatch.preamble_sha256,
+        dispatch,
+      });
     }
 
     if (!insideHerdr() && !process.env.HERDR_SOCKET_PATH) {
@@ -364,6 +378,7 @@ export const start = {
       ['cwd', cwd],
       ['launch', [ctx.flags.model && `model=${ctx.flags.model}`, ctx.flags.effort && `effort=${ctx.flags.effort}`,
         (ctx.passthrough ?? []).length && `args=${ctx.passthrough.join(' ')}`].filter(Boolean).join('  ') || null],
+      ['contract', `${contractLevel}  ${c.dim(`(~${Math.round(Buffer.byteLength(preamble) / 4)} tokens injected)`)}`],
       ['preamble', `sha256:${dispatch.preamble_sha256.slice(0, 16)}`],
     ]));
     if (bareShell) {
@@ -378,6 +393,8 @@ export const start = {
       pane: { pane_id: paneInfo.pane_id, workspace_id: paneInfo.workspace_id ?? null, tab_id: paneInfo.tab_id ?? null },
       agent: { name: agentKind ? agentName : null, kind: agentKind, ready: agentReady, bare_shell: bareShell },
       injected,
+      contract: contractLevel,
+      preamble_tokens_approx: Math.round(Buffer.byteLength(preamble) / 4),
       preamble_sha256: dispatch.preamble_sha256,
     });
   },
@@ -451,7 +468,11 @@ export const show = {
 
     let preamble = null;
     if (ctx.flags.preamble) {
-      preamble = buildPreamble({ run, task, dispatch });
+      preamble = buildPreamble({
+        run, task, dispatch,
+        workerKind: dispatch.target?.agent_kind ? 'agent' : 'bare-shell',
+        contract: dispatch.contract ?? 'full',
+      });
       const matches = sha256(preamble) === dispatch.preamble_sha256;
       say(ctx, `\n${c.dim('  preamble')} ${matches ? c.green('(hash matches)') : c.red('(HASH MISMATCH — task spec changed since dispatch)')}`);
       say(ctx, preamble);

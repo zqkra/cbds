@@ -146,6 +146,25 @@ It never passes ids — they come from its pane environment.
 task complete: those events are a closed built-in set and are not durable across a server
 restart, so they are structurally unfit to carry a completion signal.
 
+### Where cbds deliberately differs: the preamble is sized to the task
+
+Orca pushes its full ~1700-token preamble on every dispatch regardless of task size.
+For a one-line task that is ~178x more protocol than work — tokens spent, and a wall
+of process burying the actual instruction.
+
+cbds pushes only what a correct report depends on and lets the worker **pull** the
+rest with `cbds contract`:
+
+| `--contract` | ~tokens | For |
+|---|---|---|
+| `minimal` | ~200 | a greeting, a one-line check |
+| `standard` *(default)* | ~380 | almost everything |
+| `full` | ~1100 | long autonomous work using heartbeat / ask / escalate |
+
+Every level carries the three outcomes, exactly-once, the never-use-your-own-UI rule,
+and stop-after-reporting. Nothing is lost by going compact; it is just not shipped on
+every dispatch.
+
 ### Mapping from Orca
 
 | Orca | cbds | Herdr-native realization |
@@ -161,7 +180,7 @@ restart, so they are structurally unfit to carry a completion signal.
 | `worker-start` | **`cbds dispatch start`** | Composes split + agent start + injection into one receipt. |
 | `heartbeat` | **`cbds heartbeat --phase`** | Dispatch-scoped liveness. Never wakes a wait; surfaces on timeouts and the board. |
 | `send --to dispatch:<id>` | **`cbds send --to <dispatch_id>`** | Structured mail, not prompt injection: it arrives on the worker's next `check` and cannot corrupt an in-flight turn. |
-| Injected dispatch preamble | **`buildPreamble`** | Same structure: rules as comments at the point of use, TASK last, bare-shell vs agent post-report text, inapplicable sections omitted rather than softened. |
+| Injected dispatch preamble | **`buildPreamble`** | Same structure: rules as comments at the point of use, TASK last, bare-shell vs agent post-report text, inapplicable sections omitted rather than softened. **But sized to the task** — see below. |
 | `--retry-of` | **`--retry-of`** | The old dispatch permanently loses authority. |
 | `--model` / `--effort` per launch | **`--model` / `--effort`** | Translated only for verified CLIs (claude, codex); everything else uses `--` passthrough, which Herdr forwards verbatim. |
 | Nested worker depth guard | **`CBDS_DEPTH`** | Injected per generation; refuses above `--max-depth`. |
@@ -188,6 +207,7 @@ cbds ask / reply   # blocking worker question, coordinator answer
 cbds escalate      # pre-completion blocker (worker) — does not settle the task
 cbds check / send  # coordinator -> worker follow-up mail
 cbds trust         # pre-trust a directory so agents don't stall on a trust dialog
+cbds contract      # the full worker protocol, pulled on demand
 cbds whoami        # worker self-check: am I really live?
 cbds status        # what am I, what is live
 cbds board         # live overview of tasks, states and pane ids

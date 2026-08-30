@@ -235,20 +235,28 @@ describe('herdr independence', () => {
     const taskId = (await cliJson(dir, ['task', 'create', '--spec', 'x'])).json.data.task_id;
     const res = await cliJson(dir, ['dispatch', 'start', '--task', taskId, '--dry-run']);
     assert.equal(res.code, 0);
+    // The default is the compact `standard` contract.
     const pre = res.json.data.preamble;
-    assert.match(pre, /=== CLI COMMANDS ===/);
+    assert.equal(res.json.data.contract, 'standard');
     assert.match(pre, /cbds done --outcome succeeded/);
     assert.match(pre, /cbds done --outcome failed/);
-    assert.match(pre, /cbds heartbeat --phase/);
-    assert.match(pre, /cbds ask --question/);
-    assert.match(pre, /cbds escalate --subject/);
+    assert.match(pre, /cbds done --outcome blocked/);
     assert.match(pre, /cbds whoami/);
-    assert.match(pre, /=== AFTER YOU REPORT ===/);
+    assert.match(pre, /cbds contract/, 'it must point at the pull command');
     // The TASK must be LAST: it is the thing to act on, so it gets recency.
-    assert.ok(pre.lastIndexOf('=== TASK') > pre.lastIndexOf('=== AFTER YOU REPORT ==='),
+    assert.ok(pre.lastIndexOf('=== TASK') > pre.lastIndexOf('--outcome blocked'),
       'the TASK block must come after the contract');
+
+    // ...and the full level still carries everything.
+    const full = await cliJson(dir, ['dispatch', 'start', '--task', taskId, '--contract', 'full', '--dry-run']);
+    const fp = full.json.data.preamble;
+    assert.match(fp, /=== CLI COMMANDS ===/);
+    assert.match(fp, /cbds heartbeat --phase/);
+    assert.match(fp, /cbds ask --question/);
+    assert.match(fp, /cbds escalate --subject/);
+    assert.match(fp, /=== AFTER YOU REPORT ===/);
     // A section that does not apply is omitted, never softened.
-    assert.ok(!pre.includes('=== SUB-DISPATCH ==='), 'sub-dispatch must be omitted at max depth');
+    assert.ok(!fp.includes('=== SUB-DISPATCH ==='), 'sub-dispatch must be omitted at max depth');
 
     const task = await cliJson(dir, ['task', 'show', taskId]);
     assert.equal(task.json.data.state, 'ready', 'a dry run must not dispatch the task');
@@ -507,5 +515,83 @@ describe('failed launch leaves nothing behind', () => {
     const b = agentNameForDispatch('dsp_bbbbbbbbbbbbb');
     assert.notEqual(a, b, 'two dispatches must never share an agent name');
     assert.match(a, /^[a-z][a-z0-9_-]{0,31}$/, 'must satisfy Herdr\'s agent-name rule');
+  });
+});
+
+/* ------------------------------------------------- contract right-sizing -- */
+
+describe('contract levels', () => {
+  const sample = {
+    run: { run_id: 'run_x', objective: 'greet' },
+    task: { task_id: 'tsk_x', title: 'Saludo', spec: 'Hola.', max_attempts: 3 },
+    dispatch: { dispatch_id: 'dsp_x', attempt: 1 },
+  };
+
+  test('every level carries the rules a correct report depends on', async () => {
+    const { buildPreamble, CONTRACT_LEVELS } = await import('../src/herdr/preamble.mjs');
+    for (const contract of CONTRACT_LEVELS) {
+      const p = buildPreamble({ ...sample, contract });
+      assert.match(p, /done --outcome succeeded/, `${contract}: how to succeed`);
+      assert.match(p, /done --outcome failed/, `${contract}: how to fail`);
+      assert.match(p, /done --outcome blocked/, `${contract}: how to say it is stuck`);
+      assert.match(p, /exactly once|EXACTLY ONCE/i, `${contract}: exactly-once rule`);
+      assert.match(p, /interactive UI|AskUserQuestion/, `${contract}: the hang-forever rule`);
+      assert.match(p, /Hola\./, `${contract}: the task itself`);
+      // The TASK is last at every level, so the thing to act on gets recency.
+      assert.ok(p.lastIndexOf('=== TASK') > p.lastIndexOf('--outcome blocked'),
+        `${contract}: TASK must come after the protocol`);
+    }
+  });
+
+  test('compact levels point at the pull command instead of inlining everything', async () => {
+    const { buildPreamble } = await import('../src/herdr/preamble.mjs');
+    for (const contract of ['minimal', 'standard']) {
+      const p = buildPreamble({ ...sample, contract });
+      assert.match(p, /cbds contract/, `${contract} must tell the worker where the rest is`);
+      assert.ok(!p.includes('heartbeat --phase'), `${contract} must not inline optional verbs`);
+    }
+  });
+
+  test('levels are meaningfully cheaper, and full stays complete', async () => {
+    const { buildPreamble } = await import('../src/herdr/preamble.mjs');
+    const size = (contract) => Buffer.byteLength(buildPreamble({ ...sample, contract }));
+    assert.ok(size('minimal') < size('standard'), 'minimal < standard');
+    assert.ok(size('standard') < size('full'), 'standard < full');
+    assert.ok(size('standard') < size('full') / 2,
+      'the default must be well under half the full contract, or it is not worth the knob');
+
+    const full = buildPreamble({ ...sample, contract: 'full' });
+    for (const verb of ['heartbeat --phase', 'ask --question', 'escalate --subject', 'contract']) {
+      assert.ok(full.includes(verb) || verb === 'contract', `full must document ${verb}`);
+    }
+  });
+
+  test('cbds contract prints the full protocol so nothing is lost by going compact', async () => {
+    const { buildContractText, buildPreamble } = await import('../src/herdr/preamble.mjs');
+    const text = buildContractText();
+    for (const verb of ['done --outcome succeeded', 'heartbeat --phase', 'ask --question',
+      'escalate --subject', 'whoami']) {
+      assert.ok(text.includes(verb), `cbds contract must document ${verb}`);
+    }
+    // Whatever the compact preamble omitted must be recoverable here.
+    const compact = buildPreamble({ ...sample, contract: 'standard' });
+    assert.ok(!compact.includes('heartbeat --phase') && text.includes('heartbeat --phase'),
+      'omitted-but-pullable is the whole point');
+  });
+
+  test('an unknown contract level is rejected', async () => {
+    const dir = tmpProject();
+    await cliJson(dir, ['run', 'create', '--objective', 'x']);
+    const taskId = (await cliJson(dir, ['task', 'create', '--spec', 'y'])).json.data.task_id;
+    const res = await cliJson(dir, ['dispatch', 'start', '--task', taskId, '--contract', 'huge', '--dry-run']);
+    assert.equal(res.code, 2);
+  });
+
+  test('dispatch defaults to standard and reports what it injected', async () => {
+    const dir = tmpProject();
+    await cliJson(dir, ['run', 'create', '--objective', 'x']);
+    const taskId = (await cliJson(dir, ['task', 'create', '--spec', 'y'])).json.data.task_id;
+    const res = await cliJson(dir, ['dispatch', 'start', '--task', taskId, '--dry-run']);
+    assert.equal(res.json.data.dispatch.contract, 'standard');
   });
 });
