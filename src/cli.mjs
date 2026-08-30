@@ -16,8 +16,9 @@ import { release, retain } from './commands/lifecycle.mjs';
 import { heartbeat, ask, escalate, check, reply, send } from './commands/messaging.mjs';
 import { trust } from './commands/trust.mjs';
 import { contract } from './commands/contract.mjs';
+import * as gateCmd from './commands/gate.mjs';
 
-export const VERSION = '1.3.0';
+export const VERSION = '1.4.0';
 
 /** Flags accepted by every command. */
 const GLOBAL_FLAGS = {
@@ -54,6 +55,13 @@ const TREE = {
     sub: {
       start: dispatchCmd.start, list: dispatchCmd.list,
       show: dispatchCmd.show, cancel: dispatchCmd.cancel,
+    },
+  },
+  gate: {
+    describe: 'coordinator decisions that block a task',
+    sub: {
+      create: gateCmd.create, list: gateCmd.list,
+      resolve: gateCmd.resolve, cancel: gateCmd.cancel,
     },
   },
   report: {

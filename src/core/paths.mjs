@@ -69,6 +69,8 @@ export const layout = (root) => ({
       outbox: path.join(base, 'outbox'),
       rejected: path.join(base, 'inbox', 'rejected'),
       dispatchCursor: (id) => path.join(base, 'cursors', `${id}.json`),
+      gates: path.join(base, 'gates'),
+      gate: (id) => path.join(base, 'gates', `${id}.json`),
       seq: path.join(base, 'inbox', '.seq'),
       cursor: path.join(base, 'cursor.json'),
       lock: path.join(base, 'seq.lock'),

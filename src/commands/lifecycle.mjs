@@ -5,7 +5,7 @@ import { emit, say, kv, c, paintState } from '../core/output.mjs';
 import { loadDispatch, saveDispatch, loadTask } from '../core/model.mjs';
 import { resolveRun, resolveDispatchId } from '../core/context.mjs';
 import { ensureDir, nowIso } from '../core/store.mjs';
-import { agentRead, paneRead, paneClose, clearPanePaint } from '../herdr/client.mjs';
+import { agentRead, paneRead, paneClose, clearPanePaint, worktreeRemove } from '../herdr/client.mjs';
 
 /**
  * Post-completion cleanup, mirroring Orca's release/retain split.
@@ -20,6 +20,7 @@ export const release = {
   flags: {
     force: { type: 'boolean', describe: 'release even if the dispatch has not settled' },
     'keep-pane': { type: 'boolean', describe: 'capture the transcript but leave the pane open' },
+    'remove-worktree': { type: 'boolean', describe: 'also delete the isolated worktree cbds created for this dispatch' },
     lines: { type: 'number', default: 2000, describe: 'transcript lines to capture' },
   },
   async run(ctx) {
@@ -88,8 +89,32 @@ export const release = {
       }
     }
 
+    /* ---- optionally drop the isolated worktree ---- */
+
+    let worktreeRemoved = false;
+    let worktreeNote = null;
+    if (ctx.flags['remove-worktree']) {
+      if (!dispatch.worktree?.created) {
+        worktreeNote = 'cbds did not create a worktree for this dispatch';
+      } else if (dispatch.outcome !== 'succeeded' && !ctx.flags.force) {
+        // Deleting the checkout of a failed attempt destroys the evidence and any
+        // uncommitted work in it. That has to be an explicit choice.
+        worktreeNote = `outcome is ${dispatch.outcome ?? 'unsettled'}; pass --force to delete the worktree anyway`;
+      } else {
+        try {
+          await worktreeRemove(dispatch.worktree.workspace_id);
+          worktreeRemoved = true;
+        } catch (err) {
+          worktreeNote = `worktree removal failed: ${err.code ?? err.message}`;
+        }
+      }
+    } else if (dispatch.worktree?.created) {
+      worktreeNote = 'kept (pass --remove-worktree to delete it)';
+    }
+
     dispatch.released = true;
     dispatch.released_at = nowIso();
+    dispatch.worktree_removed = worktreeRemoved;
     dispatch.transcript_path = transcriptPath;
     if (dispatch.state !== 'settled') { dispatch.state = 'abandoned'; dispatch.authority = false; }
     saveDispatch(store, dispatch, { event: 'dispatch.released', closed, reason: closeReason });
@@ -99,8 +124,14 @@ export const release = {
       ['pane', closed ? `${paneId} ${c.dim('(closed)')}` : `${paneId ?? '—'} ${c.dim(`(retained: ${closeReason})`)}`],
       ['transcript', transcriptPath ?? c.dim('none captured')],
       ['outcome', dispatch.outcome ? paintState(dispatch.outcome) : null],
+      ['worktree', dispatch.worktree
+        ? `${dispatch.worktree.branch} ${worktreeRemoved ? c.dim('(removed)') : c.dim(`(${worktreeNote ?? 'kept'})`)}`
+        : null],
     ]));
-    return emit(ctx, { dispatch, closed, close_reason: closeReason, transcript_path: transcriptPath });
+    return emit(ctx, {
+      dispatch, closed, close_reason: closeReason, transcript_path: transcriptPath,
+      worktree_removed: worktreeRemoved, worktree_note: worktreeNote,
+    });
   },
 };
 

@@ -153,6 +153,29 @@ export const agentKinds = async () => {
   return kindsCache;
 };
 
+/**
+ * Create a git worktree and its Herdr workspace.
+ *
+ * This is what makes parallel work on one repo safe: without it, several workers
+ * dispatched into the same checkout edit the same files and silently clobber each
+ * other. Herdr puts the checkout under ~/.herdr/worktrees/<repo>/<branch> and returns
+ * a fresh workspace with a root pane already sitting in it.
+ */
+export const worktreeCreate = ({ cwd, branch, base = null, label = null }) => {
+  const args = ['worktree', 'create', '--cwd', cwd, '--branch', branch, '--no-focus'];
+  if (base) args.push('--base', base);
+  if (label) args.push('--label', label);
+  return herdr(args, { timeoutMs: 120_000 });
+};
+
+export const worktreeList = (cwd) => herdr(['worktree', 'list', '--cwd', cwd]);
+
+export const worktreeRemove = (workspaceId, { force = true } = {}) => {
+  const args = ['worktree', 'remove', '--workspace', workspaceId];
+  if (force) args.push('--force');
+  return herdr(args, { timeoutMs: 60_000, allow: ['worktree_not_found', 'workspace_not_found'] });
+};
+
 export const agentStart = ({ name, kind, paneId, timeoutMs = 60_000, args: agentArgs = [] }) => {
   const args = ['agent', 'start', name, '--kind', kind, '--pane', paneId, '--timeout', String(timeoutMs)];
   if (agentArgs.length) args.push('--', ...agentArgs);

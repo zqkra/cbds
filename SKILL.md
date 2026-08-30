@@ -97,6 +97,70 @@ The optional verbs are *pulled*, not pushed.
 Rule of thumb: if the task spec is shorter than the protocol, the protocol is too big.
 A one-line task under `full` is ~178x more protocol than work.
 
+### Parallel work on one repo: isolate it
+
+**Two workers dispatched into the same checkout edit the same files and clobber each
+other.** cbds does not detect that for you — you prevent it:
+
+```bash
+cbds dispatch start --task <id> --agent claude --worktree new
+cbds dispatch start --task <id> --agent codex  --worktree new --branch feat/billing --base origin/main
+```
+
+`--worktree new` creates a real git worktree (Herdr puts it under
+`~/.herdr/worktrees/<repo>/<branch>`, default branch `cbds/<task>`) and lands the
+worker inside it. Default is `current`, which shares your checkout.
+
+**Rule:** if two live dispatches would touch the same files, they need separate
+worktrees. Same-file work that must stay in your checkout has to be serialised with
+`--deps` instead.
+
+Cleanup:
+
+```bash
+cbds release <dispatch_id> --remove-worktree     # only after a succeeded outcome
+```
+
+Release refuses to delete the worktree of a failed attempt without `--force`, because
+that destroys the evidence and any uncommitted work in it.
+
+### Decision gates: park a task until you decide
+
+A gate is the mirror of `ask`. `ask` is worker-initiated mid-task; a gate is
+**coordinator-initiated before the work starts** — it is how a plan says "this branch
+is undecided, do not dispatch it yet".
+
+```bash
+cbds gate create --task <id> --question "shared component or page-only?" --options "shared,page-only"
+# the task goes `blocked`, and dispatch start now REFUSES it (exit 7, task_gated)
+
+cbds gate list --state open
+cbds gate resolve <gate_id> --resolution shared
+# the task returns to `ready` once EVERY open gate on it is resolved
+```
+
+Use this instead of holding the decision in your own head: your context can be
+compacted or your session can die, and the gate survives both.
+
+The resolution is **not** auto-injected into the worker. If the decision changes what
+the worker should do, put it in the spec before dispatching:
+
+```bash
+cbds task update <id> --spec "<original spec>  Decision: use the shared component."
+```
+
+### Letting a worker dispatch its own sub-workers
+
+Nesting is capped at 1 generation by default, so a worker's `dispatch start` fails
+with `nested_depth_exceeded`. For a large plan with a sub-coordinator:
+
+```bash
+cbds dispatch start --task <id> --agent claude --max-depth 2 --contract full
+```
+
+`--contract full` matters here: the sub-dispatch instructions only appear in the full
+contract, and only when nesting is actually allowed.
+
 ### Choosing the model and effort per worker
 
 Each worker is launched independently, so you pick the right agent **and** the right

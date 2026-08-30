@@ -30,8 +30,9 @@ export const newRunId = () => newId('run');
 export const newTaskId = () => newId('tsk');
 export const newDispatchId = () => newId('dsp');
 export const newReportId = () => newId('rpt');
+export const newGateId = () => newId('gat');
 
-const ID_RE = /^(run|tsk|dsp|rpt)_[0-9a-hjkmnp-tv-z]{13}$/;
+const ID_RE = /^(run|tsk|dsp|rpt|gat)_[0-9a-hjkmnp-tv-z]{13}$/;
 export const isId = (value, prefix) =>
   typeof value === 'string' && ID_RE.test(value) && (!prefix || value.startsWith(`${prefix}_`));
 

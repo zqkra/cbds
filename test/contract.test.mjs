@@ -595,3 +595,90 @@ describe('contract levels', () => {
     assert.equal(res.json.data.dispatch.contract, 'standard');
   });
 });
+
+/* -------------------------------------------------------- decision gates -- */
+
+describe('decision gates', () => {
+  let dir; let runId; let taskId;
+
+  before(async () => {
+    dir = tmpProject();
+    runId = (await cliJson(dir, ['run', 'create', '--objective', 'gates'])).json.data.run_id;
+    taskId = (await cliJson(dir, ['task', 'create', '--spec', 'undecided work'])).json.data.task_id;
+  });
+
+  test('opening a gate blocks the task', async () => {
+    const res = await cliJson(dir, ['gate', 'create', '--task', taskId,
+      '--question', 'shared or page-only?', '--options', 'shared,page-only']);
+    assert.equal(res.code, 0);
+    assert.equal(res.json.data.state, 'open');
+
+    const task = await cliJson(dir, ['task', 'show', taskId]);
+    assert.equal(task.json.data.state, 'blocked');
+  });
+
+  test('a gated task cannot be dispatched — enforced, not just displayed', async () => {
+    const res = await cliJson(dir, ['dispatch', 'start', '--task', taskId, '--dry-run']);
+    assert.equal(res.code, 7);
+    assert.equal(res.json.error.code, 'task_gated');
+  });
+
+  test('a resolution outside the declared options is refused', async () => {
+    const gate = (await cliJson(dir, ['gate', 'list', '--state', 'open'])).json.data.gates[0];
+    const res = await cliJson(dir, ['gate', 'resolve', gate.gate_id, '--resolution', 'neither']);
+    assert.equal(res.code, 2);
+  });
+
+  test('resolving unblocks the task and lets it dispatch', async () => {
+    const gate = (await cliJson(dir, ['gate', 'list', '--state', 'open'])).json.data.gates[0];
+    const res = await cliJson(dir, ['gate', 'resolve', gate.gate_id, '--resolution', 'shared']);
+    assert.equal(res.code, 0);
+    assert.equal(res.json.data.task.state, 'ready');
+
+    const ok = await cliJson(dir, ['dispatch', 'start', '--task', taskId, '--dry-run']);
+    assert.equal(ok.code, 0);
+  });
+
+  test('a task gated twice stays blocked until every gate is resolved', async () => {
+    const t = (await cliJson(dir, ['task', 'create', '--spec', 'doubly gated'])).json.data.task_id;
+    const g1 = (await cliJson(dir, ['gate', 'create', '--task', t, '--question', 'q1'])).json.data;
+    const g2 = (await cliJson(dir, ['gate', 'create', '--task', t, '--question', 'q2'])).json.data;
+
+    await cliJson(dir, ['gate', 'resolve', g1.gate_id, '--resolution', 'a']);
+    let task = await cliJson(dir, ['task', 'show', t]);
+    assert.equal(task.json.data.state, 'blocked', 'one gate resolved is not enough');
+
+    await cliJson(dir, ['gate', 'resolve', g2.gate_id, '--resolution', 'b']);
+    task = await cliJson(dir, ['task', 'show', t]);
+    assert.equal(task.json.data.state, 'ready');
+  });
+
+  test('a resolved gate cannot be resolved again', async () => {
+    const g = (await cliJson(dir, ['gate', 'list', '--state', 'resolved'])).json.data.gates[0];
+    const res = await cliJson(dir, ['gate', 'resolve', g.gate_id, '--resolution', 'x']);
+    assert.equal(res.code, 7);
+  });
+});
+
+describe('worktree isolation', () => {
+  test('--worktree new refuses to combine with --pane', async () => {
+    const dir = tmpProject();
+    await cliJson(dir, ['run', 'create', '--objective', 'wt']);
+    const t = (await cliJson(dir, ['task', 'create', '--spec', 'x'])).json.data.task_id;
+    const res = await cliJson(dir, ['dispatch', 'start', '--task', t,
+      '--worktree', 'new', '--pane', 'w1:p1'], {
+      HERDR_ENV: '1', HERDR_SOCKET_PATH: '/tmp/fake.sock', HERDR_BIN_PATH: '/bin/true',
+    });
+    assert.equal(res.code, 2);
+  });
+
+  test('an unknown --worktree value is refused rather than guessed', async () => {
+    const dir = tmpProject();
+    await cliJson(dir, ['run', 'create', '--objective', 'wt']);
+    const t = (await cliJson(dir, ['task', 'create', '--spec', 'x'])).json.data.task_id;
+    const res = await cliJson(dir, ['dispatch', 'start', '--task', t, '--worktree', 'maybe'], {
+      HERDR_ENV: '1', HERDR_SOCKET_PATH: '/tmp/fake.sock', HERDR_BIN_PATH: '/bin/true',
+    });
+    assert.equal(res.code, 2);
+  });
+});

@@ -10,9 +10,10 @@ import { agentNameForDispatch } from '../core/ids.mjs';
 import { appendEvent } from '../core/store.mjs';
 import { buildPreamble, sha256, workerEnv, CONTRACT_LEVELS } from '../herdr/preamble.mjs';
 import { buildAgentArgs, launchKinds } from '../herdr/launch.mjs';
+import { openGatesForTask } from './gate.mjs';
 import {
   paneSplit, agentStart, agentPrompt, paneLayout, paneGet, paintPane, insideHerdr, callerPane,
-  agentKinds, KNOWN_AGENT_KINDS, agentGet, agentWait, paneClose,
+  agentKinds, KNOWN_AGENT_KINDS, agentGet, agentWait, paneClose, worktreeCreate,
 } from '../herdr/client.mjs';
 
 /**
@@ -41,6 +42,9 @@ export const start = {
     pane: { type: 'string', placeholder: 'pane_id', describe: 'attach to an existing pane instead of splitting' },
     direction: { type: 'string', describe: 'right|down (default: chosen from pane geometry)' },
     cwd: { type: 'string', placeholder: 'path', describe: 'working directory for the worker' },
+    worktree: { type: 'string', default: 'current', describe: 'current | new — `new` gives this worker an isolated git worktree so parallel workers cannot clobber each other' },
+    branch: { type: 'string', describe: 'branch for --worktree new (default: cbds/<task>)' },
+    base: { type: 'string', placeholder: 'ref', describe: 'base ref for the new worktree' },
     name: { type: 'string', describe: 'agent name (default: derived from the task id)' },
     'retry-of': { type: 'string', placeholder: 'dispatch_id', describe: 'supersede a previous attempt' },
     focus: { type: 'boolean', default: false, describe: 'move the user’s focus to the worker' },
@@ -73,6 +77,14 @@ export const start = {
       throw conflict('nested_depth_exceeded',
         `this pane is already a cbds worker at depth ${depth} (max ${ctx.flags['max-depth']})`,
         'complete the task yourself rather than routing around the guard, or raise --max-depth');
+    }
+    // An open gate is a hard precondition, not a label. A plan must not be able to
+    // run past a decision its coordinator has not made.
+    const gates = openGatesForTask(store, run.run_id, task.task_id);
+    if (gates.length) {
+      throw conflict('task_gated',
+        `task ${task.task_id} is blocked by ${gates.length} open decision gate(s)`,
+        `resolve it first: cbds gate resolve ${gates[0].gate_id} --resolution "<choice>"`);
     }
     if (!depsSatisfied(store, task)) {
       throw conflict('deps_unsatisfied',
@@ -185,8 +197,47 @@ export const start = {
       const { trust: trustCmd } = await import('./trust.mjs');
       await trustCmd.run({
         ...ctx, commandName: 'trust', json: false, quiet: true,
-        flags: { agent: agentKind }, positional: [cwd],
+        flags: { agent: agentKind }, positional: [workCwd],
       });
+    }
+
+    /* ---- isolate the worker in its own worktree, if asked ---- */
+
+    let worktree = null;
+    let splitFrom = callerPane().pane_id;
+    let workCwd = cwd;
+
+    if (ctx.flags.worktree === 'new') {
+      if (ctx.flags.pane) throw usage('--worktree new cannot combine with --pane');
+      const branch = ctx.flags.branch ?? `cbds/${task.task_id.replace(/^tsk_/, '')}`;
+      try {
+        const res = await worktreeCreate({
+          cwd, branch, base: ctx.flags.base ?? null,
+          label: truncate(task.title, 24),
+        });
+        const info = res?.workspace?.worktree ?? res?.worktree ?? {};
+        worktree = {
+          branch,
+          base: ctx.flags.base ?? null,
+          checkout_path: info.checkout_path ?? null,
+          repo_root: info.repo_root ?? cwd,
+          workspace_id: res?.workspace?.workspace_id ?? null,
+          created: true,
+        };
+        // Split from the worktree's own root pane so the worker lands inside the
+        // isolated checkout rather than the coordinator's directory.
+        splitFrom = res?.root_pane?.pane_id ?? splitFrom;
+        workCwd = worktree.checkout_path ?? cwd;
+        dispatch.target.cwd = workCwd;
+        dispatch.worktree = worktree;
+        saveDispatch(store, dispatch, { event: 'dispatch.worktree_created', branch, path: workCwd });
+      } catch (err) {
+        supersedeDispatch(store, dispatch, `worktree creation failed: ${err.code ?? 'error'}`);
+        throw err;
+      }
+    } else if (ctx.flags.worktree !== 'current') {
+      throw usage(`--worktree must be "current" or "new" (got "${ctx.flags.worktree}")`,
+        'to reuse an existing worktree, pass its path with --cwd');
     }
 
     /* ---- place the worker ---- */
@@ -200,11 +251,11 @@ export const start = {
       } else {
         const direction = ctx.flags.direction
           ? oneOf(ctx.flags.direction, ['right', 'down'], 'direction')
-          : await chooseDirection(callerPane().pane_id);
+          : await chooseDirection(splitFrom);
         const env = workerEnv({ run, task, dispatch, stateDir: ctx.stateRoot, depth: depth + 1 });
         const res = await paneSplit({
-          targetPaneId: callerPane().pane_id,
-          direction, cwd, env,
+          targetPaneId: splitFrom,
+          direction, cwd: workCwd, env,
           focus: ctx.flags.focus,
           ratio: ctx.flags.ratio ?? null,
         });
@@ -375,7 +426,8 @@ export const start = {
       ['agent', agentKind ? `${agentKind} (${agentName})` : 'none (bare shell)'],
       ['pane', paneInfo.pane_id],
       ['attempt', `${dispatch.attempt} of ${task.max_attempts}`],
-      ['cwd', cwd],
+      ['cwd', workCwd],
+      ['worktree', worktree ? `${c.green(worktree.branch)}  ${c.dim(worktree.checkout_path ?? '')}` : c.dim('current (shared checkout)')],
       ['launch', [ctx.flags.model && `model=${ctx.flags.model}`, ctx.flags.effort && `effort=${ctx.flags.effort}`,
         (ctx.passthrough ?? []).length && `args=${ctx.passthrough.join(' ')}`].filter(Boolean).join('  ') || null],
       ['contract', `${contractLevel}  ${c.dim(`(~${Math.round(Buffer.byteLength(preamble) / 4)} tokens injected)`)}`],
@@ -392,6 +444,7 @@ export const start = {
       dispatch, task,
       pane: { pane_id: paneInfo.pane_id, workspace_id: paneInfo.workspace_id ?? null, tab_id: paneInfo.tab_id ?? null },
       agent: { name: agentKind ? agentName : null, kind: agentKind, ready: agentReady, bare_shell: bareShell },
+      worktree,
       injected,
       contract: contractLevel,
       preamble_tokens_approx: Math.round(Buffer.byteLength(preamble) / 4),

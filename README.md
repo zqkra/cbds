@@ -183,11 +183,14 @@ every dispatch.
 | Injected dispatch preamble | **`buildPreamble`** | Same structure: rules as comments at the point of use, TASK last, bare-shell vs agent post-report text, inapplicable sections omitted rather than softened. **But sized to the task** — see below. |
 | `--retry-of` | **`--retry-of`** | The old dispatch permanently loses authority. |
 | `--model` / `--effort` per launch | **`--model` / `--effort`** | Translated only for verified CLIs (claude, codex); everything else uses `--` passthrough, which Herdr forwards verbatim. |
+| Decision gate | **`cbds gate`** | Coordinator-owned question that blocks a task. Enforced in `dispatch start` (exit 7 `task_gated`), not merely displayed. |
+| Worktree isolation | **`--worktree new`** | Maps to `herdr worktree create`. Without it, parallel workers on one repo clobber each other. |
 | Nested worker depth guard | **`CBDS_DEPTH`** | Injected per generation; refuses above `--max-depth`. |
 
-Deliberately **not** copied: the scheduler (you choose placement and concurrency), the
-general message bus (`herdr-mesh` already fills that niche), and worktree management
-(`herdr worktree` is better than anything cbds would add).
+Deliberately **not** copied: the scheduler (you choose placement and concurrency) and
+the general message bus (`herdr-mesh` already fills that niche). Still missing:
+federated workers across machines, and reading the agent's real transcript via hooks
+rather than the terminal.
 
 ---
 
@@ -208,6 +211,7 @@ cbds escalate      # pre-completion blocker (worker) — does not settle the tas
 cbds check / send  # coordinator -> worker follow-up mail
 cbds trust         # pre-trust a directory so agents don't stall on a trust dialog
 cbds contract      # the full worker protocol, pulled on demand
+cbds gate create|list|resolve|cancel   # coordinator decisions that block a task
 cbds whoami        # worker self-check: am I really live?
 cbds status        # what am I, what is live
 cbds board         # live overview of tasks, states and pane ids
