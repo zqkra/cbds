@@ -1,0 +1,73 @@
+# cbds — Reliable multi-agent orchestration for the Herdr herd.
+#
+# Install:  herdr plugin install zqkra/cbds
+# Develop:  herdr plugin link /path/to/cbds
+
+id = "dev.cbds.cbds"
+name = "cbds"
+version = "1.0.0"
+min_herdr_version = "0.8.0"
+description = "Reliable multi-agent orchestration for the Herdr herd: durable tasks, authoritative worker reports, and a wait that cannot hang."
+platforms = ["linux", "macos", "windows"]
+
+# No [[build]] block, on purpose. cbds is zero-dependency Node ESM, so installing it
+# needs no registry, no `npm ci`, and no compile step — there is nothing that can fail
+# at install time or drift between platforms.
+
+# ---------------------------------------------------------------- startup ----
+
+# After Herdr restores a session, pane ids can point at panes that no longer exist.
+# This reconciles dispatch state so the board and `cbds wait` do not chase ghosts.
+[[startup]]
+command = ["node", "plugin/startup.mjs"]
+
+# ---------------------------------------------------------------- actions ----
+
+[[actions]]
+id = "board"
+title = "cbds: open board"
+contexts = ["workspace", "pane"]
+command = ["node", "plugin/action-board.mjs"]
+
+[[actions]]
+id = "status"
+title = "cbds: status"
+contexts = ["workspace", "pane"]
+command = ["node", "plugin/action-status.mjs"]
+
+[[actions]]
+id = "release"
+title = "cbds: release this worker"
+contexts = ["pane"]
+command = ["node", "plugin/action-release.mjs"]
+
+# ------------------------------------------------------------------ panes ----
+
+# `node` is invoked explicitly rather than through a `cbds` shim: Herdr documents that
+# pane commands do NOT get Windows PATHEXT shim resolution, so a bare `cbds` would
+# work on Unix and silently fail on Windows.
+[[panes]]
+id = "board"
+title = "cbds board"
+placement = "split"
+command = ["node", "plugin/board-pane.mjs"]
+
+# ----------------------------------------------------------------- events ----
+
+# Advisory only. These make a wait fail fast when a worker pane dies; they never
+# settle a task and never invent an outcome.
+[[events]]
+on = "pane.closed"
+command = ["node", "plugin/event-pane-closed.mjs"]
+
+[[events]]
+on = "pane.exited"
+command = ["node", "plugin/event-pane-closed.mjs"]
+
+# ------------------------------------------------------------------- keys ----
+
+[[keys.command]]
+key = "prefix+b"
+type = "plugin_action"
+command = "dev.cbds.cbds.board"
+description = "open the cbds board"
