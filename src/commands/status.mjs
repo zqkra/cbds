@@ -5,6 +5,19 @@ import { readActiveRunId } from '../core/context.mjs';
 import { insideHerdr, callerPane, herdrBin } from '../herdr/client.mjs';
 
 /**
+ * Herdr connectivity, stated honestly. A session reachable over the socket but with
+ * no pane id is a real state (a script, a plugin hook), and saying "pane null" there
+ * reads like a bug rather than a fact.
+ */
+const herdrLabel = () => {
+  const { pane_id: paneId } = callerPane();
+  if (!insideHerdr()) return c.yellow('not inside a Herdr pane');
+  return paneId
+    ? `${c.green('connected')} ${c.dim(`pane ${paneId}`)}`
+    : `${c.green('connected')} ${c.dim('(no pane context)')}`;
+};
+
+/**
  * One screen answering the two questions an agent has on waking up:
  * "what am I?" and "what is live?".
  */
@@ -30,7 +43,7 @@ export const status = {
     say(ctx, '');
     say(ctx, kv([
       ['role', role === 'worker' ? c.yellow('worker') : c.cyan('orchestrator')],
-      ['herdr', insideHerdr() ? `${c.green('connected')} ${c.dim(`pane ${callerPane().pane_id}`)}` : c.yellow('not inside a Herdr pane')],
+      ['herdr', herdrLabel()],
       ['herdr bin', herdrBin()],
       ['store', store ? ctx.stateRoot : c.dim(`${ctx.stateRoot} (not initialised)`)],
       ['active run', store ? readActiveRunId(store) : null],
