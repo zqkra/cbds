@@ -125,6 +125,34 @@ export const paneSplit = async ({ targetPaneId = null, direction = 'right', cwd 
   return herdr(args, { timeoutMs: 30_000 });
 };
 
+/**
+ * The agent kinds this Herdr build supports.
+ *
+ * Asked of Herdr rather than hardcoded, so a kind added by a Herdr upgrade works
+ * immediately instead of being rejected by a stale list in cbds. The static list is
+ * only a fallback for when Herdr cannot be reached.
+ */
+export const KNOWN_AGENT_KINDS = [
+  'pi', 'claude', 'codex', 'gemini', 'cursor', 'devin', 'agy', 'cline', 'omp',
+  'mastracode', 'opencode', 'copilot', 'kimi', 'kiro', 'droid', 'amp', 'grok',
+  'hermes', 'kilo', 'qodercli', 'qwen', 'maki',
+];
+
+let kindsCache = null;
+export const agentKinds = async () => {
+  if (kindsCache) return kindsCache;
+  // `herdr agent` prints its group listing to STDERR and exits 2 (it is a usage
+  // message, not a failure), so this reads both streams and ignores the exit code.
+  try {
+    const { stdout, stderr } = await runRaw(['agent'], { timeoutMs: 8000 });
+    const line = `${stdout}\n${stderr}`.match(/^\s*kinds:\s*(.+)$/m)?.[1];
+    const kinds = line?.split('|').map((k) => k.trim()).filter(Boolean) ?? [];
+    if (kinds.length) { kindsCache = { kinds, source: 'herdr' }; return kindsCache; }
+  } catch { /* fall back below */ }
+  kindsCache = { kinds: KNOWN_AGENT_KINDS, source: 'builtin' };
+  return kindsCache;
+};
+
 export const agentStart = ({ name, kind, paneId, timeoutMs = 60_000, args: agentArgs = [] }) => {
   const args = ['agent', 'start', name, '--kind', kind, '--pane', paneId, '--timeout', String(timeoutMs)];
   if (agentArgs.length) args.push('--', ...agentArgs);

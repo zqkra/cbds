@@ -112,6 +112,25 @@ cbds wait --timeout 900000 --all                   # every live dispatch in the 
 cbds wait --timeout 1000                           # drain reports already on disk
 ```
 
+### Answering workers mid-flight
+
+`cbds wait` wakes on three things, not just completions: `report`, `question` and
+`escalation`. Heartbeats deliberately do **not** wake it — they are liveness, not news.
+
+```bash
+cbds wait --task <task_id> --timeout 900000 --json
+# -> type: "question"   the worker is BLOCKED. Answer it, then keep waiting:
+cbds reply --id <message_id> --body "<answer>"
+
+# -> type: "escalation" the worker hit a blocker but is still running and still
+#                       owes you a report. Unblock it, then keep waiting.
+
+# Send unsolicited guidance to a live worker (it arrives on its next `cbds check`):
+cbds send --to <dispatch_id> --subject "heads up" --body "skip the CSS bit"
+```
+
+A question or escalation does **not** settle the task. Only a report does.
+
 ### After every report
 
 Account for the worker before you wait again or end your turn. Exactly one of:
@@ -181,6 +200,42 @@ cbds whoami
 This check exists because a preamble is just text: it can be scrolled back to, copied,
 or inherited. Your environment (`CBDS_TASK_ID`, `CBDS_DISPATCH_ID`) is what actually
 makes you a worker.
+
+### While you work
+
+```bash
+cbds heartbeat --phase implementing     # every ~5 min on long work
+```
+
+The coordinator uses heartbeats to tell "still thinking" from "hung". Skip them only
+while blocked inside `ask` — that call is itself a liveness signal.
+
+**Never ask a human through your own interactive UI** — `AskUserQuestion`, a TUI
+confirm, a y/n prompt. The coordinator cannot see it and cannot answer it, so you hang
+forever waiting on someone who is not looking. Every interactive question goes through
+`cbds ask`:
+
+```bash
+cbds ask --question "shared component or page-only?" --options "shared,page-only" --timeout 600000
+# prints the coordinator's answer, then you continue.
+# If it times out, resume by id — NEVER ask again, or you create a duplicate thread:
+cbds ask --resume <message_id> --timeout 600000
+```
+
+If you are blocked in a way the coordinator must fix before you can continue, but you
+are not asking a question:
+
+```bash
+cbds escalate --subject "Blocked: missing credentials" --body "<details>"
+```
+
+An escalation does not settle your task — you still owe exactly one report.
+
+Read guidance the coordinator sent you:
+
+```bash
+cbds check
+```
 
 ### Then, report exactly once
 

@@ -159,6 +159,9 @@ restart, so they are structurally unfit to carry a completion signal.
 | Delivery / ack FIFO | **Report + cursor** | FIFO per run; a crash replays rather than loses. |
 | `worker-release` / `worker-retain` | **`cbds release` / `retain`** | Transcript captured first; only cbds-created panes are closed. |
 | `worker-start` | **`cbds dispatch start`** | Composes split + agent start + injection into one receipt. |
+| `heartbeat` | **`cbds heartbeat --phase`** | Dispatch-scoped liveness. Never wakes a wait; surfaces on timeouts and the board. |
+| `send --to dispatch:<id>` | **`cbds send --to <dispatch_id>`** | Structured mail, not prompt injection: it arrives on the worker's next `check` and cannot corrupt an in-flight turn. |
+| Injected dispatch preamble | **`buildPreamble`** | Same structure: rules as comments at the point of use, TASK last, bare-shell vs agent post-report text, inapplicable sections omitted rather than softened. |
 | `--retry-of` | **`--retry-of`** | The old dispatch permanently loses authority. |
 | Nested worker depth guard | **`CBDS_DEPTH`** | Injected per generation; refuses above `--max-depth`. |
 
@@ -179,6 +182,10 @@ cbds dispatch start|list|show|cancel
 cbds report list|show|ack
 cbds done          # the authoritative completion signal (worker)
 cbds wait          # the reliable receive primitive (orchestrator)
+cbds heartbeat     # liveness + phase (worker) — never wakes a wait
+cbds ask / reply   # blocking worker question, coordinator answer
+cbds escalate      # pre-completion blocker (worker) — does not settle the task
+cbds check / send  # coordinator -> worker follow-up mail
 cbds whoami        # worker self-check: am I really live?
 cbds status        # what am I, what is live
 cbds board         # live overview of tasks, states and pane ids

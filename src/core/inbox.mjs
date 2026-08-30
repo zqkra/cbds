@@ -1,11 +1,28 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { newReportId } from './ids.mjs';
+import { newReportId, newId } from './ids.mjs';
 import { SCHEMA_VERSION } from './model.mjs';
 import { nowIso, readJson, writeJsonAtomic, withLock, ensureDir, appendEvent } from './store.mjs';
 
 const pad = (n) => String(n).padStart(7, '0');
+
+/**
+ * Message types, mirroring Orca's set.
+ *
+ * Coordinator-bound mail lands in `inbox/`, worker-bound mail in `outbox/`. Only
+ * `report` is terminal — it is the one type that settles a dispatch. Everything else
+ * is coordination traffic and can never complete a task.
+ */
+export const MESSAGE_TYPES = ['report', 'heartbeat', 'question', 'escalation', 'reply', 'follow_up'];
+
+/** Types that wake a coordinator `wait` by default. Heartbeats deliberately do not. */
+export const DEFAULT_WAKE_TYPES = ['report', 'question', 'escalation'];
+
+export const WORKER_BOUND = new Set(['reply', 'follow_up']);
+
+/** Messages written before v1.1 carry no `type`; they are all reports. */
+export const messageType = (m) => m?.type ?? 'report';
 
 /** Monotonic per-run sequence, claimed under the run lock. Gives reports a FIFO order. */
 const claimSeq = (R) => withLock(R.lock, () => {
@@ -22,27 +39,74 @@ const claimSeq = (R) => withLock(R.lock, () => {
  * Rejected reports are kept deliberately: a zombie worker trying to complete a
  * superseded dispatch is diagnostic information, not noise to be dropped.
  */
-export const writeReport = (R, report) => {
+export const writeReport = (R, message) => {
   const seq = claimSeq(R);
-  const withSeq = { ...report, seq };
-  const dir = report.acceptance?.accepted ? R.inbox : R.rejected;
+  const withSeq = { ...message, seq };
+  const type = messageType(message);
+  const dir = WORKER_BOUND.has(type)
+    ? R.outbox
+    : (message.acceptance?.accepted === false ? R.rejected : R.inbox);
   ensureDir(dir);
-  const file = path.join(dir, `${pad(seq)}-${report.dispatch_id}.json`);
+  const file = path.join(dir, `${pad(seq)}-${type}-${message.dispatch_id ?? 'run'}.json`);
   writeJsonAtomic(file, withSeq);
   appendEvent(R.events, {
-    event: report.acceptance?.accepted ? 'report.accepted' : 'report.rejected',
-    report_id: report.report_id,
-    dispatch_id: report.dispatch_id,
-    task_id: report.task_id,
-    outcome: report.outcome,
-    reason: report.acceptance?.reason ?? null,
+    event: `message.${type}${message.acceptance?.accepted === false ? '.rejected' : ''}`,
+    report_id: message.report_id,
+    dispatch_id: message.dispatch_id,
+    task_id: message.task_id,
+    outcome: message.outcome ?? null,
+    reason: message.acceptance?.reason ?? null,
   });
   return { report: withSeq, file };
 };
 
+export const writeMessage = writeReport;
+
+/**
+ * Build any coordination message. `report` is the only type with an acceptance
+ * verdict, because it is the only type that can settle a dispatch.
+ */
+export const buildMessage = ({
+  type = 'report', to = 'coordinator',
+  runId, taskId, dispatchId,
+  outcome = null, subject = null, body = null,
+  filesModified = [], artifacts = [], nextSteps = null,
+  question = null, options = [], inReplyTo = null, phase = null,
+}) => ({
+  schema_version: SCHEMA_VERSION,
+  kind: 'message',
+  type,
+  to,
+  report_id: newReportId(),
+  seq: null,
+  run_id: runId,
+  task_id: taskId,
+  dispatch_id: dispatchId,
+  outcome,
+  subject,
+  body,
+  files_modified: filesModified,
+  artifacts,
+  next_steps: nextSteps,
+  question,
+  options,
+  in_reply_to: inReplyTo,
+  phase,
+  reported_at: nowIso(),
+  reported_from: {
+    pane_id: process.env.HERDR_PANE_ID ?? null,
+    host: os.hostname(),
+    pid: process.pid,
+  },
+  acceptance: { accepted: type !== 'report', reason: null, at: null },
+  acked_at: null,
+});
+
 export const buildReport = ({ runId, taskId, dispatchId, outcome, subject, body, filesModified = [], artifacts = [], nextSteps = null, question = null }) => ({
   schema_version: SCHEMA_VERSION,
   kind: 'report',
+  type: 'report',
+  to: 'coordinator',
   report_id: newReportId(),
   seq: null,
   run_id: runId,
@@ -55,6 +119,9 @@ export const buildReport = ({ runId, taskId, dispatchId, outcome, subject, body,
   artifacts,
   next_steps: nextSteps,
   question,
+  options: [],
+  in_reply_to: null,
+  phase: null,
   reported_at: nowIso(),
   reported_from: {
     pane_id: process.env.HERDR_PANE_ID ?? null,
@@ -80,6 +147,10 @@ const readDirReports = (dir) => {
 
 export const scanInbox = (R) => readDirReports(R.inbox);
 export const scanRejected = (R) => readDirReports(R.rejected);
+export const scanOutbox = (R) => readDirReports(R.outbox);
+
+/** Coordinator-bound reports only — what settles tasks. */
+export const scanReports = (R) => scanInbox(R).filter((m) => messageType(m) === 'report');
 
 export const readCursor = (R) => readJson(R.cursor, { optional: true }) ?? { schema_version: SCHEMA_VERSION, acked_seq: 0 };
 

@@ -235,8 +235,20 @@ describe('herdr independence', () => {
     const taskId = (await cliJson(dir, ['task', 'create', '--spec', 'x'])).json.data.task_id;
     const res = await cliJson(dir, ['dispatch', 'start', '--task', taskId, '--dry-run']);
     assert.equal(res.code, 0);
-    assert.match(res.json.data.preamble, /COMPLETION CONTRACT/);
-    assert.match(res.json.data.preamble, /cbds done --outcome succeeded/);
+    const pre = res.json.data.preamble;
+    assert.match(pre, /=== CLI COMMANDS ===/);
+    assert.match(pre, /cbds done --outcome succeeded/);
+    assert.match(pre, /cbds done --outcome failed/);
+    assert.match(pre, /cbds heartbeat --phase/);
+    assert.match(pre, /cbds ask --question/);
+    assert.match(pre, /cbds escalate --subject/);
+    assert.match(pre, /cbds whoami/);
+    assert.match(pre, /=== AFTER YOU REPORT ===/);
+    // The TASK must be LAST: it is the thing to act on, so it gets recency.
+    assert.ok(pre.lastIndexOf('=== TASK') > pre.lastIndexOf('=== AFTER YOU REPORT ==='),
+      'the TASK block must come after the contract');
+    // A section that does not apply is omitted, never softened.
+    assert.ok(!pre.includes('=== SUB-DISPATCH ==='), 'sub-dispatch must be omitted at max depth');
 
     const task = await cliJson(dir, ['task', 'show', taskId]);
     assert.equal(task.json.data.state, 'ready', 'a dry run must not dispatch the task');
@@ -289,3 +301,80 @@ const makeDispatch = async (dir, runId, taskId, retryOf = null) => {
   assert.equal(res.code, 0, `dispatch start failed: ${res.stdout}${res.stderr}`);
   return res.json.data.dispatch.dispatch_id;
 };
+
+/* -------------------------------------------------- coordination traffic -- */
+
+describe('coordination messages', () => {
+  let dir; let runId; let taskId; let dispatchId; let env;
+
+  before(async () => {
+    dir = tmpProject();
+    runId = (await cliJson(dir, ['run', 'create', '--objective', 'messaging'])).json.data.run_id;
+    taskId = (await cliJson(dir, ['task', 'create', '--spec', 'talkative work'])).json.data.task_id;
+    dispatchId = await makeDispatch(dir, runId, taskId);
+    // Stand in for the injected worker pane environment.
+    env = { CBDS_RUN_ID: runId, CBDS_TASK_ID: taskId, CBDS_DISPATCH_ID: dispatchId };
+  });
+
+  test('a heartbeat records liveness without waking a wait', async () => {
+    const hb = await cliJson(dir, ['heartbeat', '--phase', 'implementing'], env);
+    assert.equal(hb.code, 0);
+    assert.equal(hb.json.data.phase, 'implementing');
+
+    // A heartbeat must NOT satisfy a wait: it is liveness, not news.
+    const res = await cliJson(dir, ['wait', '--task', taskId, '--timeout', '1500', '--no-hints']);
+    assert.equal(res.code, 4, 'a heartbeat must not resolve a wait');
+    assert.equal(res.json.data.outstanding[0].phase, 'implementing',
+      'but a timeout must surface how recently the worker was alive');
+  });
+
+  test('an escalation wakes the coordinator without settling the task', async () => {
+    const waiter = cliJson(dir, ['wait', '--task', taskId, '--timeout', '15000', '--no-hints']);
+    setTimeout(() => {
+      cliJson(dir, ['escalate', '--subject', 'Blocked: no credentials', '--body', 'need a token'], env);
+    }, 500);
+    const res = await waiter;
+    assert.equal(res.code, 0);
+    assert.equal(res.json.data.reports[0].type, 'escalation');
+
+    const task = await cliJson(dir, ['task', 'show', taskId]);
+    assert.equal(task.json.data.state, 'dispatched', 'an escalation must not settle the task');
+  });
+
+  test('ask blocks, reply unblocks, and the answer comes back', async () => {
+    const asker = cliJson(dir, ['ask', '--question', 'shared component or page-only?',
+      '--options', 'shared,page-only', '--timeout', '20000'], env);
+
+    // The coordinator sees the question through its normal wait.
+    const seen = await cliJson(dir, ['wait', '--task', taskId, '--timeout', '15000', '--no-hints']);
+    assert.equal(seen.code, 0);
+    assert.equal(seen.json.data.reports[0].type, 'question');
+    const questionId = seen.json.data.reports[0].report_id;
+
+    await cliJson(dir, ['reply', '--id', questionId, '--body', 'shared']);
+
+    const answered = await asker;
+    assert.equal(answered.code, 0, `ask failed: ${answered.stdout}${answered.stderr}`);
+    assert.equal(answered.json.data.answer.body, 'shared');
+  });
+
+  test('a coordinator follow-up reaches the worker through check', async () => {
+    await cliJson(dir, ['send', '--to', dispatchId, '--subject', 'heads up', '--body', 'skip the CSS bit']);
+    const res = await cliJson(dir, ['check'], env);
+    assert.equal(res.code, 0);
+    assert.equal(res.json.data.count, 1);
+    assert.equal(res.json.data.messages[0].body, 'skip the CSS bit');
+
+    // The dispatch cursor advances, so the same message is not re-delivered.
+    const again = await cliJson(dir, ['check'], env);
+    assert.equal(again.json.data.count, 0);
+  });
+
+  test('a superseded worker cannot keep emitting lifecycle traffic', async () => {
+    const retry = await makeDispatch(dir, runId, taskId, dispatchId);
+    assert.ok(retry);
+    const hb = await cliJson(dir, ['heartbeat', '--phase', 'zombie'], env);
+    assert.equal(hb.code, 5, 'the superseded dispatch must be refused');
+    assert.equal(hb.json.error.code, 'stale_dispatch');
+  });
+});

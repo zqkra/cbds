@@ -2,7 +2,9 @@ import { csv, requireFlag } from '../core/args.mjs';
 import { CbdsError, EXIT, usage } from '../core/errors.mjs';
 import { emit, say, kv, c, paintState, duration, relTime, truncate } from '../core/output.mjs';
 import { loadTask, loadDispatch, listDispatches, listTasks, addHint, saveDispatch, saveTask } from '../core/model.mjs';
-import { waitForReport, scanInbox, readCursor, markAcked } from '../core/inbox.mjs';
+import {
+  waitForReport, scanInbox, readCursor, markAcked, messageType, DEFAULT_WAKE_TYPES,
+} from '../core/inbox.mjs';
 import { resolveRun, resolveTaskId, resolveDispatchId } from '../core/context.mjs';
 import { watchPaneDeath } from '../herdr/events.mjs';
 import { paneAlive } from '../herdr/client.mjs';
@@ -27,6 +29,7 @@ export const wait = {
     dispatch: { type: 'string', placeholder: 'dispatch_id', describe: 'wait on one dispatch' },
     timeout: { type: 'number', placeholder: 'ms', describe: 'REQUIRED — no wait is ever unbounded' },
     outcome: { type: 'string', placeholder: 'csv', describe: 'only wake for these outcomes' },
+    types: { type: 'string', placeholder: 'csv', describe: `message types that wake you (default: ${DEFAULT_WAKE_TYPES.join(',')})` },
     all: { type: 'boolean', describe: 'wait until every in-scope dispatch has settled' },
     any: { type: 'boolean', default: true, describe: 'return on the first report (default)' },
     ack: { type: 'boolean', default: true, describe: 'acknowledge returned reports' },
@@ -67,14 +70,22 @@ export const wait = {
     const scopeIds = new Set(scopeDispatches.map((d) => d.dispatch_id));
     const pending = scopeDispatches.filter((d) => d.state === 'dispatched');
     const wantOutcomes = csv(ctx.flags.outcome);
+    const wantTypes = csv(ctx.flags.types).length ? csv(ctx.flags.types) : DEFAULT_WAKE_TYPES;
     const cursor = readCursor(R);
 
-    const matches = (report) => {
-      if (!scopeIds.has(report.dispatch_id)) return false;
-      if (ctx.flags.unacked && report.seq <= cursor.acked_seq) return false;
-      if (wantOutcomes.length && !wantOutcomes.includes(report.outcome)) return false;
+    // A heartbeat is liveness, not news: it never wakes a wait, but it is recorded
+    // so a timeout can show how recently the worker was alive.
+    const matches = (m) => {
+      if (!scopeIds.has(m.dispatch_id)) return false;
+      if (!wantTypes.includes(messageType(m))) return false;
+      if (ctx.flags.unacked && m.seq <= cursor.acked_seq) return false;
+      if (wantOutcomes.length && messageType(m) === 'report' && !wantOutcomes.includes(m.outcome)) return false;
       return true;
     };
+
+    // Only a terminal report settles a dispatch. A question or escalation wakes the
+    // coordinator but leaves the worker running and still owing a report.
+    const settles = (m) => messageType(m) === 'report';
 
     const waitAll = Boolean(ctx.flags.all);
     const startedAt = Date.now();
@@ -82,7 +93,7 @@ export const wait = {
     /* ---- fast path: is it already on disk? ---- */
 
     const already = scanInbox(R).filter(matches);
-    const settledIds = new Set(already.map((r) => r.dispatch_id));
+    const settledIds = new Set(already.filter(settles).map((r) => r.dispatch_id));
     const outstanding = () => pending.filter((d) => !settledIds.has(d.dispatch_id));
 
     if (already.length && (!waitAll || outstanding().length === 0)) {
@@ -136,7 +147,7 @@ export const wait = {
 
         if (result.status === 'found') {
           collected.push(...result.reports);
-          for (const r of result.reports) settledIds.add(r.dispatch_id);
+          for (const r of result.reports.filter(settles)) settledIds.add(r.dispatch_id);
           if (!waitAll || outstanding().length === 0) {
             return finish(ctx, R, store, run, collected, {
               status: 'found', scopeLabel, elapsed: Date.now() - startedAt, pending: outstanding(),
@@ -151,7 +162,7 @@ export const wait = {
           const late = scanInbox(R).filter(matches).filter((r) => !collected.some((x) => x.report_id === r.report_id));
           if (late.length) {
             collected.push(...late);
-            for (const r of late) settledIds.add(r.dispatch_id);
+            for (const r of late.filter(settles)) settledIds.add(r.dispatch_id);
             if (!waitAll || outstanding().length === 0) {
               return finish(ctx, R, store, run, collected, {
                 status: 'found', scopeLabel, elapsed: Date.now() - startedAt, pending: outstanding(),
@@ -188,6 +199,8 @@ export const wait = {
       task_id: d.task_id,
       pane_id: d.target.pane_id,
       running_for_ms: Date.now() - new Date(d.started_at).getTime(),
+      phase: d.phase ?? null,
+      last_heartbeat_at: d.last_heartbeat_at ?? null,
       last_hint: d.hints?.at(-1) ?? null,
     }));
 
@@ -195,7 +208,10 @@ export const wait = {
       say(ctx, `${c.yellow('wait timed out')} after ${duration(timeout)} on ${scopeLabel}`);
       say(ctx, c.dim('  this is a checkpoint, not a failure — long tasks routinely run 15-60 minutes'));
       for (const d of detail) {
-        say(ctx, `  ${c.bold(d.dispatch_id)}  pane ${d.pane_id}  running ${duration(d.running_for_ms)}${d.last_hint ? c.dim(`  last hint: ${d.last_hint.kind}=${d.last_hint.value}`) : ''}`);
+        const beat = d.last_heartbeat_at
+          ? c.green(`  alive ${relTime(d.last_heartbeat_at)}${d.phase ? ` (${d.phase})` : ''}`)
+          : (d.last_hint ? c.dim(`  last hint: ${d.last_hint.kind}=${d.last_hint.value}`) : '');
+        say(ctx, `  ${c.bold(d.dispatch_id)}  pane ${d.pane_id}  running ${duration(d.running_for_ms)}${beat}`);
       }
       say(ctx, c.dim(`\n  keep waiting: cbds wait --timeout ${timeout}${ctx.flags.task ? ` --task ${ctx.flags.task}` : ''}`));
     }
@@ -265,8 +281,9 @@ const finish = (ctx, R, store, run, reports, meta) => {
   if (!ctx.json) {
     say(ctx, `${c.green('report received')}${meta.immediate ? c.dim(' (already on disk)') : ` after ${duration(meta.elapsed)}`}`);
     for (const r of acked) {
+      const type = messageType(r);
       say(ctx, '');
-      say(ctx, `  ${paintState(r.outcome)}  ${c.bold(r.subject ?? '(no subject)')}`);
+      say(ctx, `  ${type === 'report' ? paintState(r.outcome) : c.cyan(type)}  ${c.bold(r.subject ?? '(no subject)')}`);
       say(ctx, kv([
         ['task', r.task_id],
         ['dispatch', r.dispatch_id],
@@ -277,6 +294,13 @@ const finish = (ctx, R, store, run, reports, meta) => {
       ]));
       if (r.body) {
         say(ctx, `\n${r.body.split('\n').map((l) => `    ${l}`).join('\n')}`);
+      }
+      if (messageType(r) === 'question') {
+        say(ctx, c.yellow(`\n    the worker is BLOCKED on this. Answer it:`));
+        say(ctx, `    cbds reply --id ${r.report_id} --body "<answer>"`);
+      }
+      if (messageType(r) === 'escalation') {
+        say(ctx, c.yellow('\n    the worker is still running and still owes a report.'));
       }
     }
     if (meta.pending?.length) {

@@ -13,8 +13,9 @@ import { status } from './commands/status.mjs';
 import { board } from './commands/board.mjs';
 import { doctor } from './commands/doctor.mjs';
 import { release, retain } from './commands/lifecycle.mjs';
+import { heartbeat, ask, escalate, check, reply, send } from './commands/messaging.mjs';
 
-export const VERSION = '1.0.0';
+export const VERSION = '1.1.0';
 
 /** Flags accepted by every command. */
 const GLOBAL_FLAGS = {
@@ -65,6 +66,12 @@ const TREE = {
   doctor,
   release,
   retain,
+  heartbeat,
+  ask,
+  escalate,
+  check,
+  reply,
+  send,
 };
 
 const isCommand = (node) => node && typeof node.run === 'function';
@@ -127,6 +134,8 @@ const rootHelp = () => {
     '',
     c.dim('typical worker loop'),
     '  cbds whoami                                    # am I really a live worker?',
+    '  cbds heartbeat --phase implementing            # every ~5 min on long work',
+    '  cbds ask --question "…" --timeout 600000       # blocking question to the coordinator',
     '  cbds done --outcome succeeded --body "…"       # exactly once, even on failure',
     '',
     c.dim(`exit codes: 0 ok · 2 usage · 3 not found · 4 timeout · 5 stale dispatch · 6 no herdr · 7 conflict · 8 worker vanished`),

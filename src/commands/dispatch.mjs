@@ -11,13 +11,8 @@ import { appendEvent } from '../core/store.mjs';
 import { buildPreamble, sha256, workerEnv } from '../herdr/preamble.mjs';
 import {
   paneSplit, agentStart, agentPrompt, paneLayout, paneGet, paintPane, insideHerdr, callerPane,
+  agentKinds, KNOWN_AGENT_KINDS,
 } from '../herdr/client.mjs';
-
-const AGENT_KINDS = [
-  'pi', 'claude', 'codex', 'gemini', 'cursor', 'devin', 'agy', 'cline', 'omp', 'mastracode',
-  'opencode', 'copilot', 'kimi', 'kiro', 'droid', 'amp', 'grok', 'hermes', 'kilo',
-  'qodercli', 'qwen', 'maki',
-];
 
 /**
  * Herdr's own guidance: split a wide pane to the right, a narrow or tall one down.
@@ -41,7 +36,7 @@ export const start = {
   usage: 'cbds dispatch start --task <task_id> [--agent <kind>] [--pane <pane_id>]',
   flags: {
     task: { type: 'string', placeholder: 'task_id', describe: 'the task to dispatch' },
-    agent: { type: 'string', describe: `agent kind: ${AGENT_KINDS.slice(0, 6).join('|')}|…` },
+    agent: { type: 'string', describe: `agent kind: ${KNOWN_AGENT_KINDS.slice(0, 6).join('|')}|… (any kind your Herdr supports)` },
     pane: { type: 'string', placeholder: 'pane_id', describe: 'attach to an existing pane instead of splitting' },
     direction: { type: 'string', describe: 'right|down (default: chosen from pane geometry)' },
     cwd: { type: 'string', placeholder: 'path', describe: 'working directory for the worker' },
@@ -114,8 +109,12 @@ export const start = {
 
     const bareShell = Boolean(ctx.flags['no-agent']);
     const agentKind = bareShell ? null : (ctx.flags.agent ?? store.config?.default_agent ?? 'claude');
-    if (agentKind && !AGENT_KINDS.includes(agentKind)) {
-      throw usage(`unknown agent kind "${agentKind}"`, `known kinds: ${AGENT_KINDS.join(', ')}`);
+    if (agentKind) {
+      const { kinds, source } = await agentKinds();
+      if (!kinds.includes(agentKind)) {
+        throw usage(`unknown agent kind "${agentKind}"`,
+          `kinds supported by ${source === 'herdr' ? 'your Herdr' : 'cbds (Herdr unreachable)'}: ${kinds.join(', ')}`);
+      }
     }
     if (bareShell && ctx.flags.agent) {
       throw usage('--no-agent and --agent are mutually exclusive');
@@ -128,7 +127,15 @@ export const start = {
       agent_name: agentName, agent_kind: agentKind, cwd,
     }, { retryOf, preambleSha: null, supervised: !ctx.flags.pane });
 
-    const preamble = buildPreamble({ run, task, dispatch });
+    // The preamble is shaped for the worker it is going to: a bare shell must exit
+    // after reporting (no prompt to reuse), an agent must idle and stay reusable.
+    // The sub-dispatch section is omitted entirely unless nesting is actually
+    // allowed — a worker told it "usually cannot" delegate still tries.
+    const preamble = buildPreamble({
+      run, task, dispatch,
+      workerKind: bareShell ? 'bare-shell' : 'agent',
+      canDispatchSubWorkers: depth + 1 < ctx.flags['max-depth'],
+    });
     dispatch.preamble_sha256 = sha256(preamble);
 
     if (ctx.flags['dry-run']) {
