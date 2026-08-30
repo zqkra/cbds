@@ -3,7 +3,7 @@ import path from 'node:path';
 import { emit, say, table, c, paintState, relTime } from '../core/output.mjs';
 import { listRuns, listTasks, listDispatches, saveDispatch, saveTask, addHint } from '../core/model.mjs';
 import { scanInbox, scanRejected } from '../core/inbox.mjs';
-import { insideHerdr, herdrBin, herdr, paneAlive } from '../herdr/client.mjs';
+import { insideHerdr, herdrBin, herdrText, paneAlive } from '../herdr/client.mjs';
 import { nowIso } from '../core/store.mjs';
 
 /**
@@ -30,9 +30,11 @@ export const doctor = {
     const herdrOk = insideHerdr();
     let herdrVersion = null;
     try {
-      const pong = await herdr(['status'], { timeoutMs: 8000 }).catch(() => null);
-      herdrVersion = pong?.server?.version ?? pong?.version ?? null;
-    } catch { /* recorded below */ }
+      // `herdr status` prints a plain-text report, not a JSON envelope.
+      const text = await herdrText(['status'], { timeoutMs: 8000 });
+      herdrVersion = text.match(/server:[\s\S]*?version:\s*(\S+)/)?.[1]
+        ?? text.match(/version:\s*(\S+)/)?.[1] ?? null;
+    } catch { /* reported as a warning below */ }
 
     if (!herdrOk) {
       add('warn', 'not_in_herdr',
