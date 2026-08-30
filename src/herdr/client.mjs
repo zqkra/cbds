@@ -172,6 +172,16 @@ export const agentPrompt = ({ target, text, wait = false, timeoutMs = 120_000 })
 
 export const agentGet = (target) => herdr(['agent', 'get', target], { allow: ['agent_not_found'] });
 
+/** Block until the agent settles into one of `until`. Used to let a human clear a startup dialog. */
+export const agentWait = (target, { until = ['idle', 'done'], timeoutMs = 60_000 } = {}) => {
+  const args = ['agent', 'wait', target, '--timeout', String(timeoutMs)];
+  for (const state of until) args.push('--until', state);
+  return herdr(args, {
+    timeoutMs: timeoutMs + 15_000,
+    allow: ['agent_wait_timeout', 'agent_not_found', 'agent_blocked'],
+  });
+};
+
 export const agentList = () => herdr(['agent', 'list']);
 
 export const agentRead = (target, { source = 'recent-unwrapped', lines = 2000 } = {}) =>

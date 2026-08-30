@@ -163,6 +163,7 @@ restart, so they are structurally unfit to carry a completion signal.
 | `send --to dispatch:<id>` | **`cbds send --to <dispatch_id>`** | Structured mail, not prompt injection: it arrives on the worker's next `check` and cannot corrupt an in-flight turn. |
 | Injected dispatch preamble | **`buildPreamble`** | Same structure: rules as comments at the point of use, TASK last, bare-shell vs agent post-report text, inapplicable sections omitted rather than softened. |
 | `--retry-of` | **`--retry-of`** | The old dispatch permanently loses authority. |
+| `--model` / `--effort` per launch | **`--model` / `--effort`** | Translated only for verified CLIs (claude, codex); everything else uses `--` passthrough, which Herdr forwards verbatim. |
 | Nested worker depth guard | **`CBDS_DEPTH`** | Injected per generation; refuses above `--max-depth`. |
 
 Deliberately **not** copied: the scheduler (you choose placement and concurrency), the
@@ -186,6 +187,7 @@ cbds heartbeat     # liveness + phase (worker) — never wakes a wait
 cbds ask / reply   # blocking worker question, coordinator answer
 cbds escalate      # pre-completion blocker (worker) — does not settle the task
 cbds check / send  # coordinator -> worker follow-up mail
+cbds trust         # pre-trust a directory so agents don't stall on a trust dialog
 cbds whoami        # worker self-check: am I really live?
 cbds status        # what am I, what is live
 cbds board         # live overview of tasks, states and pane ids
@@ -208,6 +210,7 @@ Stable contract — orchestrators branch on these.
 | 6 | no herdr | Herdr unavailable (only `dispatch start` needs it) |
 | 7 | conflict | already settled, run closed, circuit open, illegal transition |
 | 8 | **worker vanished** | the pane died before reporting — retry the attempt |
+| 9 | **contract undelivered** | the agent started but sat at a dialog, so it never received the task. The dispatch is NOT recorded as live. |
 
 `4` and `8` are deliberately distinct. A timeout means *keep waiting, probably fine*; a
 vanish means *this attempt is dead, retry it*. Conflating them is exactly what makes
@@ -243,6 +246,7 @@ take an atomic `mkdir` lock with stale-lock breaking; readers never lock.
 
 | Failure | cbds behaviour |
 |---|---|
+| Agent starts at a trust/approval dialog | `dispatch start` exits `9` `contract_undelivered` and the dispatch is **not** left live. Fix with `cbds trust`, or `--wait-ready` if a human will answer it. |
 | Worker never reports | `wait` exits `4` with elapsed time and last hint. Keep using rolling waits. |
 | Pane closed mid-flight | `wait` exits `8`. Dispatch → `abandoned`; **task stays `dispatched`** — cbds does not know whether the work landed. |
 | Worker reports twice | Second rejected `already_settled` (exit `7`). The first stands; replay is safe. |

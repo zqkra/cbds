@@ -14,8 +14,9 @@ import { board } from './commands/board.mjs';
 import { doctor } from './commands/doctor.mjs';
 import { release, retain } from './commands/lifecycle.mjs';
 import { heartbeat, ask, escalate, check, reply, send } from './commands/messaging.mjs';
+import { trust } from './commands/trust.mjs';
 
-export const VERSION = '1.1.0';
+export const VERSION = '1.2.0';
 
 /** Flags accepted by every command. */
 const GLOBAL_FLAGS = {
@@ -72,6 +73,7 @@ const TREE = {
   check,
   reply,
   send,
+  trust,
 };
 
 const isCommand = (node) => node && typeof node.run === 'function';
@@ -188,8 +190,8 @@ export const main = async (argv) => {
     }
 
     const spec = { ...GLOBAL_FLAGS, ...(node.flags ?? {}) };
-    const { flags, positional } = parseArgs(argv.slice(i), spec);
-    ctx = buildContext({ commandName: parts.join('.'), flags, positional });
+    const { flags, positional, passthrough } = parseArgs(argv.slice(i), spec);
+    ctx = buildContext({ commandName: parts.join('.'), flags, positional, passthrough });
 
     await node.run(ctx);
     return process.exitCode ?? EXIT.OK;

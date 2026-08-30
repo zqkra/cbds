@@ -8,6 +8,9 @@ import { usage } from './errors.mjs';
 export const parseArgs = (argv, spec = {}) => {
   const flags = {};
   const positional = [];
+  // Everything after a bare `--` is passthrough, kept separate from positionals so a
+  // command can forward native arguments to another program without ambiguity.
+  const passthrough = [];
   const known = new Map();
 
   for (const [name, def] of Object.entries(spec)) {
@@ -20,7 +23,7 @@ export const parseArgs = (argv, spec = {}) => {
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === '--') { positional.push(...argv.slice(i + 1)); break; }
+    if (arg === '--') { passthrough.push(...argv.slice(i + 1)); break; }
     if (!arg.startsWith('-') || arg === '-') { positional.push(arg); continue; }
 
     let key = arg;
@@ -54,7 +57,7 @@ export const parseArgs = (argv, spec = {}) => {
     if (flags[name] === undefined && def.default !== undefined) flags[name] = def.default;
   }
 
-  return { flags, positional };
+  return { flags, positional, passthrough };
 };
 
 export const csv = (value) => {

@@ -12,6 +12,7 @@ export const EXIT = {
   NO_HERDR: 6,
   CONFLICT: 7,
   WORKER_VANISHED: 8,
+  CONTRACT_UNDELIVERED: 9,
 };
 
 export const EXIT_NAMES = Object.fromEntries(

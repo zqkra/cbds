@@ -378,3 +378,94 @@ describe('coordination messages', () => {
     assert.equal(hb.json.error.code, 'stale_dispatch');
   });
 });
+
+/* ------------------------------------------------ launch options + trust -- */
+
+describe('launch options', () => {
+  test('--model/--effort translate for verified CLIs only', async () => {
+    const { buildAgentArgs } = await import('../src/herdr/launch.mjs');
+    assert.deepEqual(buildAgentArgs({ kind: 'claude', model: 'opus', effort: 'high' }),
+      ['--model', 'opus', '--effort', 'high']);
+    assert.deepEqual(buildAgentArgs({ kind: 'codex', model: 'gpt-5.5', effort: 'xhigh' }),
+      ['--model', 'gpt-5.5', '-c', 'model_reasoning_effort="xhigh"']);
+  });
+
+  test('an unmapped agent is refused rather than given a guessed flag', async () => {
+    const { buildAgentArgs } = await import('../src/herdr/launch.mjs');
+    assert.throws(() => buildAgentArgs({ kind: 'pi', model: 'x' }), /not mapped/);
+    // ...but passthrough alone is always fine, because Herdr forwards it verbatim.
+    assert.deepEqual(buildAgentArgs({ kind: 'pi', extra: ['--foo', 'bar'] }), ['--foo', 'bar']);
+  });
+
+  test('--effort without --model is a usage error', async () => {
+    const { buildAgentArgs } = await import('../src/herdr/launch.mjs');
+    assert.throws(() => buildAgentArgs({ kind: 'claude', effort: 'high' }), /requires --model/);
+  });
+
+  test('explicit passthrough is appended last so it wins', async () => {
+    const { buildAgentArgs } = await import('../src/herdr/launch.mjs');
+    assert.deepEqual(buildAgentArgs({ kind: 'claude', model: 'opus', extra: ['--model', 'sonnet'] }),
+      ['--model', 'opus', '--model', 'sonnet']);
+  });
+
+  test('argv after -- is captured as passthrough, not as positionals', async () => {
+    const { parseArgs } = await import('../src/core/args.mjs');
+    const r = parseArgs(['--agent', 'codex', 'pos', '--', '-m', 'x'], { agent: { type: 'string' } });
+    assert.deepEqual(r.positional, ['pos']);
+    assert.deepEqual(r.passthrough, ['-m', 'x']);
+  });
+});
+
+describe('undelivered contract', () => {
+  // Regression guard for the worst bug this tool can have: an agent parked on a
+  // startup dialog never receives its task, and a dispatch recorded as live would
+  // make the coordinator wait its whole timeout for a worker that was never told
+  // what to do — the exact silent hang cbds exists to eliminate.
+  test('a blocked agent fails the dispatch instead of leaving it live', async () => {
+    const dir = tmpProject();
+    const runId = (await cliJson(dir, ['run', 'create', '--objective', 'blocked'])).json.data.run_id;
+    const taskId = (await cliJson(dir, ['task', 'create', '--spec', 'work'])).json.data.task_id;
+
+    const res = await cliJson(dir, ['dispatch', 'start', '--task', taskId, '--agent', 'claude'], {
+      HERDR_ENV: '1',
+      HERDR_SOCKET_PATH: '/tmp/cbds-test-fake.sock',
+      HERDR_BIN_PATH: blockedStub(),
+    });
+
+    assert.equal(res.code, 9, `expected contract_undelivered, got ${res.stdout}${res.stderr}`);
+    assert.equal(res.json.error.code, 'contract_undelivered');
+    assert.match(res.json.error.hint, /cbds trust/);
+
+    const task = await cliJson(dir, ['task', 'show', taskId]);
+    assert.notEqual(task.json.data.state, 'dispatched', 'the task must not be left dispatched');
+    assert.equal(task.json.data.live_dispatch_id, null, 'no dispatch may hold authority');
+
+    const dispatches = await cliJson(dir, ['dispatch', 'list', '--run', runId]);
+    for (const d of dispatches.json.data.dispatches) {
+      assert.equal(d.authority, false, 'an undelivered dispatch must not keep authority');
+    }
+  });
+});
+
+/** A Herdr stub whose agent is permanently blocked at a dialog. */
+let blockedStubPath = null;
+const blockedStub = () => {
+  if (blockedStubPath) return blockedStubPath;
+  const dir = tmpProject();
+  blockedStubPath = path.join(dir, 'herdr-blocked.mjs');
+  fs.writeFileSync(blockedStubPath, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const join = args.join(' ');
+const ok = (result) => { process.stdout.write(JSON.stringify({ id: 's', result })); process.exit(0); };
+const err = (code) => { process.stdout.write(JSON.stringify({ id: 's', error: { code, message: code } })); process.exit(1); };
+if (join.startsWith('pane split')) ok({ pane: { pane_id: 'w1:p9', workspace_id: 'w1', tab_id: 'w1:t1' } });
+if (join.startsWith('pane layout')) ok({ layout: { columns: 200, rows: 50 } });
+if (join.startsWith('pane report-metadata') || join.startsWith('pane close')) ok({ type: 'ok' });
+if (join.startsWith('agent start')) ok({ type: 'agent_started' });
+if (join.startsWith('agent prompt')) err('agent_blocked');
+if (join.startsWith('agent ')) ok({ type: 'ok' });
+ok({ type: 'ok' });
+`);
+  fs.chmodSync(blockedStubPath, 0o755);
+  return blockedStubPath;
+};

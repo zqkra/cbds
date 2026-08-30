@@ -8,7 +8,7 @@ import { loadRun, listRuns } from './model.mjs';
  * Everything a command needs: the opened store, the bound run, and the global flags.
  * Built once per invocation so no command re-derives paths.
  */
-export const buildContext = ({ commandName, flags, positional }) => {
+export const buildContext = ({ commandName, flags, positional, passthrough = [] }) => {
   const { root, projectRoot } = resolveStateDir({
     stateDir: flags['state-dir'],
     global: flags.global,
@@ -17,6 +17,7 @@ export const buildContext = ({ commandName, flags, positional }) => {
     commandName,
     flags,
     positional,
+    passthrough,
     json: Boolean(flags.json),
     quiet: Boolean(flags.quiet),
     stateRoot: root,

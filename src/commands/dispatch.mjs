@@ -9,9 +9,10 @@ import { resolveRun, resolveTaskId, resolveDispatchId } from '../core/context.mj
 import { agentNameForDispatch } from '../core/ids.mjs';
 import { appendEvent } from '../core/store.mjs';
 import { buildPreamble, sha256, workerEnv } from '../herdr/preamble.mjs';
+import { buildAgentArgs, launchKinds } from '../herdr/launch.mjs';
 import {
   paneSplit, agentStart, agentPrompt, paneLayout, paneGet, paintPane, insideHerdr, callerPane,
-  agentKinds, KNOWN_AGENT_KINDS,
+  agentKinds, KNOWN_AGENT_KINDS, agentGet, agentWait,
 } from '../herdr/client.mjs';
 
 /**
@@ -47,6 +48,10 @@ export const start = {
     'prompt-timeout': { type: 'number', default: 120000, placeholder: 'ms', describe: 'preamble delivery timeout' },
     'max-depth': { type: 'number', default: 1, describe: 'nesting guard: how many generations may dispatch' },
     ratio: { type: 'number', describe: 'split ratio, 0..1' },
+    model: { type: 'string', describe: `model for this worker (mapped for: ${launchKinds().join(', ')})` },
+    effort: { type: 'string', describe: 'reasoning effort; requires --model' },
+    'wait-ready': { type: 'number', default: 0, placeholder: 'ms', describe: 'if the agent starts blocked (e.g. a trust dialog), wait this long for a human to clear it' },
+    trust: { type: 'boolean', describe: 'pre-trust --cwd for this agent first, so it cannot stall on a directory-trust dialog' },
     'no-agent': { type: 'boolean', describe: 'create the pane with cbds env but start no agent (bare-shell dispatch)' },
     'dry-run': { type: 'boolean', describe: 'print the preamble and plan without touching Herdr' },
   },
@@ -153,6 +158,18 @@ export const start = {
         'run it from inside a Herdr pane, or use `--pane <id>` from a host with HERDR_SOCKET_PATH set');
     }
 
+    /* ---- optionally pre-trust the target directory ---- */
+
+    if (ctx.flags.trust && !bareShell) {
+      // Opt-in only. A directory-trust dialog is the most common way a dispatched
+      // worker never receives its task, and a fresh git worktree hits it every time.
+      const { trust: trustCmd } = await import('./trust.mjs');
+      await trustCmd.run({
+        ...ctx, commandName: 'trust', json: false, quiet: true,
+        flags: { agent: agentKind }, positional: [cwd],
+      });
+    }
+
     /* ---- place the worker ---- */
 
     let paneInfo;
@@ -200,6 +217,12 @@ export const start = {
       startResult = await agentStart({
         name: agentName, kind: agentKind, paneId: paneInfo.pane_id,
         timeoutMs: ctx.flags['startup-timeout'],
+        args: buildAgentArgs({
+          kind: agentKind,
+          model: ctx.flags.model ?? null,
+          effort: ctx.flags.effort ?? null,
+          extra: ctx.passthrough ?? [],
+        }),
       });
       if (startResult?._allowed) agentReady = false;
     } catch (err) {
@@ -218,24 +241,62 @@ export const start = {
 
     let promptResult = null;
     let injected = !bareShell;
-    if (bareShell) {
-      // No agent to prompt. The contract is still written to disk and printed below.
-    } else try {
-      promptResult = await agentPrompt({
-        target: agentName, text: preamble,
-        wait: false, timeoutMs: ctx.flags['prompt-timeout'],
-      });
-      if (promptResult?._allowed) injected = false;
-    } catch (err) {
+
+    /**
+     * A dispatch is only live if the worker actually received the contract.
+     *
+     * Herdr refuses to prompt an agent sitting at an approval or question dialog
+     * (agent_blocked) — a trust prompt on a new directory is the common case. If cbds
+     * recorded that dispatch as live anyway, the coordinator would wait its full
+     * timeout for a worker that was never told what to do: the exact silent hang cbds
+     * exists to eliminate. So an undelivered contract fails loudly instead.
+     */
+    const undelivered = (reason, hint) => {
       dispatch.state = 'abandoned';
       dispatch.authority = false;
-      saveDispatch(store, dispatch, { event: 'dispatch.prompt_failed', error: err.code });
-      throw new CbdsError('prompt_failed',
-        `agent started but the contract could not be delivered: ${err.message}`, {
-          exit: EXIT.NO_HERDR,
-          hint: `the worker has no obligation to report; retry with --retry-of ${dispatch.dispatch_id}`,
-          details: { pane_id: paneInfo.pane_id, dispatch_id: dispatch.dispatch_id },
+      saveDispatch(store, dispatch, { event: 'dispatch.contract_undelivered', reason });
+      return new CbdsError('contract_undelivered',
+        `the agent started in ${paneInfo.pane_id} but never received the task (${reason})`, {
+          exit: EXIT.CONTRACT_UNDELIVERED,
+          hint,
+          details: {
+            pane_id: paneInfo.pane_id, dispatch_id: dispatch.dispatch_id,
+            task_id: task.task_id, reason,
+          },
         });
+    };
+
+    if (bareShell) {
+      // No agent to prompt. The contract is still written to disk and printed below.
+    } else {
+      // An agent parked on a startup dialog can be cleared by a human. Wait only if
+      // the caller asked for it: defaulting to a silent wait would reintroduce the hang.
+      if (!agentReady && ctx.flags['wait-ready'] > 0) {
+        say(ctx, c.dim(`  agent is blocked at startup; waiting up to ${ctx.flags['wait-ready']}ms for it to clear…`));
+        try {
+          await agentWait(agentName, { until: ['idle', 'done'], timeoutMs: ctx.flags['wait-ready'] });
+          const info = await agentGet(agentName);
+          agentReady = (info?.agent ?? info)?.agent_status !== 'blocked';
+        } catch { /* still blocked; the prompt attempt below decides */ }
+      }
+
+      try {
+        promptResult = await agentPrompt({
+          target: agentName, text: preamble,
+          wait: false, timeoutMs: ctx.flags['prompt-timeout'],
+        });
+        if (promptResult?._allowed) injected = false;
+      } catch (err) {
+        throw undelivered(err.code ?? 'prompt_failed',
+          `retry with --retry-of ${dispatch.dispatch_id} once the pane is usable`);
+      }
+
+      if (!injected) {
+        const reason = promptResult._allowed;
+        throw undelivered(reason, reason === 'agent_blocked'
+          ? `the agent is sitting at a dialog (a directory-trust prompt is the usual cause). Pre-trust it with \`cbds trust "${cwd}" --agent ${agentKind}\`, or answer the dialog in pane ${paneInfo.pane_id} and pass --wait-ready 120000, then retry with --retry-of ${dispatch.dispatch_id}`
+          : `inspect the pane with \`herdr agent read ${agentName}\`, then retry with --retry-of ${dispatch.dispatch_id}`);
+      }
     }
 
     /* ---- commit ---- */
@@ -267,14 +328,15 @@ export const start = {
       ['pane', paneInfo.pane_id],
       ['attempt', `${dispatch.attempt} of ${task.max_attempts}`],
       ['cwd', cwd],
+      ['launch', [ctx.flags.model && `model=${ctx.flags.model}`, ctx.flags.effort && `effort=${ctx.flags.effort}`,
+        (ctx.passthrough ?? []).length && `args=${ctx.passthrough.join(' ')}`].filter(Boolean).join('  ') || null],
       ['preamble', `sha256:${dispatch.preamble_sha256.slice(0, 16)}`],
     ]));
     if (bareShell) {
       say(ctx, c.dim('  bare shell: no agent started, no prompt injected.'));
       say(ctx, c.dim(`  the pane carries CBDS_* env, so \`cbds done\` works there. Contract:`));
       say(ctx, c.dim(`    cbds dispatch show ${dispatch.dispatch_id} --preamble`));
-    } else if (!agentReady) say(ctx, c.yellow('  warning: agent reported not-ready at startup (blocked dialog?); the contract was still delivered'));
-    if (!injected && !bareShell) say(ctx, c.yellow(`  warning: prompt returned "${promptResult._allowed}" — verify with \`herdr agent read ${agentName}\``));
+    } else if (!agentReady) say(ctx, c.dim('  note: the agent was briefly not-ready at startup, but the contract was delivered'));
     say(ctx, c.dim(`\n  next: cbds wait --task ${task.task_id} --timeout 900000`));
 
     return emit(ctx, {

@@ -74,6 +74,54 @@ cbds dispatch start --task $B --agent codex  --json
 cbds wait --all --timeout 900000 --json      # both, in one blocking call
 ```
 
+### Choosing the model and effort per worker
+
+Each worker is launched independently, so you pick the right agent **and** the right
+model for each piece of work. A cheap mechanical task does not need your best model.
+
+```bash
+cbds dispatch start --task <id> --agent claude --model opus --effort high
+cbds dispatch start --task <id> --agent codex  --model gpt-5.5 --effort xhigh
+```
+
+`--effort` requires `--model`. cbds only translates these for CLIs it has verified
+(**claude**, **codex**); for any other agent, pass its native arguments after `--`,
+which Herdr forwards verbatim:
+
+```bash
+cbds dispatch start --task <id> --agent opencode -- --model <whatever that CLI takes>
+```
+
+Anything after `--` is appended last, so an explicit native argument always wins over
+cbds's translation. A wrong `--model` for an unmapped agent is refused up front rather
+than producing a pane that dies on a bad flag.
+
+### Directory trust — the most common reason a worker never starts
+
+`claude` and `codex` show a directory-trust dialog the first time they run somewhere
+new. A worker parked on that dialog **never receives its task**: Herdr refuses to
+prompt a blocked agent, so cbds fails the dispatch with `contract_undelivered`
+(exit 9) rather than leaving you waiting on a worker that was never told what to do.
+
+This bites every time you dispatch into a fresh git worktree. Pre-empt it:
+
+```bash
+cbds trust --check              # will any agent stall in this directory?
+cbds trust                      # pre-trust the current directory
+cbds trust /path/to/worktree --agent claude
+cbds dispatch start --task <id> --agent claude --trust    # do it inline
+```
+
+`cbds trust` is per-directory and explicit — it writes the same record the dialog
+itself would, backing up each config first. It is not a global switch, and it never
+runs unless you ask for it.
+
+If a human is at the keyboard and you would rather they answer the dialog:
+
+```bash
+cbds dispatch start --task <id> --agent claude --wait-ready 120000
+```
+
 ### Waiting properly
 
 `--timeout` is mandatory. cbds never waits forever.
@@ -89,6 +137,7 @@ Distinguish the two "nothing arrived" cases — this is the whole point of the e
 | `0` | a report arrived | process it, then `release` |
 | `4` | timeout | **keep waiting** with another rolling window |
 | `8` | the worker's pane died with no report | the attempt is dead; retry with `--retry-of` |
+| `9` | the agent started but never got the task (a trust/approval dialog) | `cbds trust` the directory, then retry with `--retry-of` |
 
 ```bash
 cbds wait --task <task_id> --timeout 900000 --json
@@ -295,6 +344,7 @@ new run does not reset the depth — it is counted from your pane's `CBDS_DEPTH`
 | 6 | no herdr | Herdr unavailable (only `dispatch start` needs it) |
 | 7 | conflict | already settled, run closed, circuit open, illegal transition |
 | 8 | worker vanished | the pane died before reporting — retry the attempt |
+| 9 | contract undelivered | the agent started but was blocked at a dialog, so it never received the task. The dispatch is NOT live. |
 
 ## Bare-shell dispatch
 
