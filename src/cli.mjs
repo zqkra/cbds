@@ -16,7 +16,7 @@ import { release, retain } from './commands/lifecycle.mjs';
 import { heartbeat, ask, escalate, check, reply, send } from './commands/messaging.mjs';
 import { trust } from './commands/trust.mjs';
 
-export const VERSION = '1.2.0';
+export const VERSION = '1.2.1';
 
 /** Flags accepted by every command. */
 const GLOBAL_FLAGS = {

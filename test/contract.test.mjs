@@ -469,3 +469,43 @@ ok({ type: 'ok' });
   fs.chmodSync(blockedStubPath, 0o755);
   return blockedStubPath;
 };
+
+describe('failed launch leaves nothing behind', () => {
+  // Reproduces the exact chain seen in the wild: the agent parks on a trust dialog,
+  // the dispatch is correctly refused (exit 9) — but the pane stayed open holding the
+  // Herdr agent name, so the retry died with agent_start_failed and doctor reported
+  // "nothing to report". Three bugs, one symptom.
+  test('the pane cbds created is closed when its own launch fails', async () => {
+    const dir = tmpProject();
+    await cliJson(dir, ['run', 'create', '--objective', 'cleanup']);
+    const taskId = (await cliJson(dir, ['task', 'create', '--spec', 'work'])).json.data.task_id;
+
+    const res = await cliJson(dir, ['dispatch', 'start', '--task', taskId, '--agent', 'claude'], {
+      HERDR_ENV: '1', HERDR_SOCKET_PATH: '/tmp/fake.sock', HERDR_BIN_PATH: blockedStub(),
+    });
+    assert.equal(res.code, 9);
+    assert.equal(res.json.error.details.pane_closed, true,
+      'a pane cbds created must not outlive its own failed launch');
+  });
+
+  test('--keep-pane-on-failure is honoured for debugging', async () => {
+    const dir = tmpProject();
+    await cliJson(dir, ['run', 'create', '--objective', 'keep']);
+    const taskId = (await cliJson(dir, ['task', 'create', '--spec', 'work'])).json.data.task_id;
+
+    const res = await cliJson(dir, ['dispatch', 'start', '--task', taskId, '--agent', 'claude',
+      '--keep-pane-on-failure'], {
+      HERDR_ENV: '1', HERDR_SOCKET_PATH: '/tmp/fake.sock', HERDR_BIN_PATH: blockedStub(),
+    });
+    assert.equal(res.code, 9);
+    assert.equal(res.json.error.details.pane_closed, false);
+  });
+
+  test('a retry gets a fresh agent name, so it cannot collide with the failed attempt', async () => {
+    const { agentNameForDispatch } = await import('../src/core/ids.mjs');
+    const a = agentNameForDispatch('dsp_aaaaaaaaaaaaa');
+    const b = agentNameForDispatch('dsp_bbbbbbbbbbbbb');
+    assert.notEqual(a, b, 'two dispatches must never share an agent name');
+    assert.match(a, /^[a-z][a-z0-9_-]{0,31}$/, 'must satisfy Herdr\'s agent-name rule');
+  });
+});

@@ -116,6 +116,9 @@ cbds dispatch start --task <id> --agent claude --trust    # do it inline
 itself would, backing up each config first. It is not a global switch, and it never
 runs unless you ask for it.
 
+The recommended shape is `--trust` inline: it removes the dialog before the agent
+starts, so the zombie-pane path never happens at all.
+
 If a human is at the keyboard and you would rather they answer the dialog:
 
 ```bash

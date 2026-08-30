@@ -246,7 +246,8 @@ take an atomic `mkdir` lock with stale-lock breaking; readers never lock.
 
 | Failure | cbds behaviour |
 |---|---|
-| Agent starts at a trust/approval dialog | `dispatch start` exits `9` `contract_undelivered` and the dispatch is **not** left live. Fix with `cbds trust`, or `--wait-ready` if a human will answer it. |
+| Agent starts at a trust/approval dialog | `dispatch start` exits `9` `contract_undelivered`, the dispatch is **not** left live, and the pane cbds created is closed so nothing keeps holding the agent name. Prevent it with `--trust`. |
+| A pane outlives a failed launch | `cbds doctor --fix` finds it (`zombie_pane`) and closes it. Keep it for debugging with `--keep-pane-on-failure`. |
 | Worker never reports | `wait` exits `4` with elapsed time and last hint. Keep using rolling waits. |
 | Pane closed mid-flight | `wait` exits `8`. Dispatch → `abandoned`; **task stays `dispatched`** — cbds does not know whether the work landed. |
 | Worker reports twice | Second rejected `already_settled` (exit `7`). The first stands; replay is safe. |

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { emit, say, table, c, paintState, relTime } from '../core/output.mjs';
 import { listRuns, listTasks, listDispatches, saveDispatch, saveTask, addHint } from '../core/model.mjs';
 import { scanInbox, scanRejected } from '../core/inbox.mjs';
-import { insideHerdr, herdrBin, herdrText, paneAlive } from '../herdr/client.mjs';
+import { insideHerdr, herdrBin, herdrText, paneAlive, paneClose } from '../herdr/client.mjs';
 import { nowIso } from '../core/store.mjs';
 
 /**
@@ -90,6 +90,37 @@ export const doctor = {
           `cbds report list --rejected --run ${run.run_id}`);
       }
 
+      /* zombie panes: a dead dispatch whose pane is still alive.
+         doctor used to look only for the opposite case (a live dispatch whose pane is
+         gone) and reported "nothing to report" while a half-started agent kept holding
+         its Herdr agent name, making every retry fail with agent_start_failed. */
+      const zombies = listDispatches(store, run.run_id)
+        .filter((d) => ['abandoned', 'superseded'].includes(d.state))
+        .filter((d) => d.target?.pane_id && d.target?.supervised && !d.released
+          && d.launch_cleanup?.closed !== true);
+      for (const d of zombies) {
+        let alive = null;
+        try { alive = await paneAlive(d.target.pane_id); } catch { alive = null; }
+        if (alive !== true) continue;
+
+        add('warn', 'zombie_pane',
+          `pane ${d.target.pane_id} is still open for ${d.state} dispatch ${d.dispatch_id} and may be holding agent name "${d.target.agent_name}"`,
+          'cbds doctor --fix');
+        reconciled.push({ dispatch_id: d.dispatch_id, pane_id: d.target.pane_id, kind: 'zombie_pane' });
+
+        if (ctx.flags.fix) {
+          try {
+            await paneClose(d.target.pane_id);
+            d.launch_cleanup = { closed: true, reason: null, by: 'doctor' };
+            d.released = true;
+            saveDispatch(store, d, { event: 'dispatch.zombie_pane_closed', pane_id: d.target.pane_id });
+            add('info', 'zombie_pane_closed', `closed ${d.target.pane_id}`);
+          } catch (err) {
+            add('error', 'zombie_pane_close_failed', `${d.target.pane_id}: ${err.message}`);
+          }
+        }
+      }
+
       /* dispatches whose panes are gone */
       const dispatches = listDispatches(store, run.run_id).filter((d) => d.state === 'dispatched');
       for (const d of dispatches) {
@@ -162,7 +193,10 @@ const report = (ctx, findings, meta) => {
       }
     }
     if (meta.reconciled?.length) {
-      say(ctx, `\n  ${meta.fixed ? c.green('reconciled') : c.yellow('would reconcile')} ${meta.reconciled.length} orphaned dispatch(es)`);
+      const z = meta.reconciled.filter((r) => r.kind === 'zombie_pane').length;
+      const o = meta.reconciled.length - z;
+      const bits = [o && `${o} orphaned dispatch(es)`, z && `${z} zombie pane(s)`].filter(Boolean).join(' and ');
+      say(ctx, `\n  ${meta.fixed ? c.green('reconciled') : c.yellow('would reconcile')} ${bits}`);
     }
   }
 

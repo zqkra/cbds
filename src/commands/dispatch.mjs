@@ -12,7 +12,7 @@ import { buildPreamble, sha256, workerEnv } from '../herdr/preamble.mjs';
 import { buildAgentArgs, launchKinds } from '../herdr/launch.mjs';
 import {
   paneSplit, agentStart, agentPrompt, paneLayout, paneGet, paintPane, insideHerdr, callerPane,
-  agentKinds, KNOWN_AGENT_KINDS, agentGet, agentWait,
+  agentKinds, KNOWN_AGENT_KINDS, agentGet, agentWait, paneClose,
 } from '../herdr/client.mjs';
 
 /**
@@ -53,6 +53,7 @@ export const start = {
     'wait-ready': { type: 'number', default: 0, placeholder: 'ms', describe: 'if the agent starts blocked (e.g. a trust dialog), wait this long for a human to clear it' },
     trust: { type: 'boolean', describe: 'pre-trust --cwd for this agent first, so it cannot stall on a directory-trust dialog' },
     'no-agent': { type: 'boolean', describe: 'create the pane with cbds env but start no agent (bare-shell dispatch)' },
+    'keep-pane-on-failure': { type: 'boolean', describe: 'leave the worker pane open when the launch fails, for debugging' },
     'dry-run': { type: 'boolean', describe: 'print the preamble and plan without touching Herdr' },
   },
   async run(ctx) {
@@ -125,12 +126,16 @@ export const start = {
       throw usage('--no-agent and --agent are mutually exclusive');
     }
     const cwd = ctx.flags.cwd ?? process.cwd();
-    const agentName = ctx.flags.name ?? agentNameForDispatch(task.task_id, task.attempts + 1);
 
     const dispatch = createDispatch(store, task, {
       pane_id: null, workspace_id: null, tab_id: null,
-      agent_name: agentName, agent_kind: agentKind, cwd,
+      agent_name: null, agent_kind: agentKind, cwd,
     }, { retryOf, preambleSha: null, supervised: !ctx.flags.pane });
+
+    // Named from the dispatch, so a retry can never collide with a previous
+    // attempt's pane that is still holding the old name.
+    const agentName = ctx.flags.name ?? agentNameForDispatch(dispatch.dispatch_id);
+    dispatch.target.agent_name = agentName;
 
     // The preamble is shaped for the worker it is going to: a bare shell must exit
     // after reporting (no prompt to reuse), an agent must idle and stay reusable.
@@ -228,12 +233,19 @@ export const start = {
     } catch (err) {
       dispatch.state = 'abandoned';
       dispatch.authority = false;
-      saveDispatch(store, dispatch, { event: 'dispatch.agent_start_failed', error: err.code });
+      const cleanup = await cleanupPane('agent_start_failed');
+      dispatch.launch_cleanup = cleanup;
+      saveDispatch(store, dispatch, { event: 'dispatch.agent_start_failed', error: err.code, pane_closed: cleanup.closed });
       throw new CbdsError('agent_start_failed',
         `could not start ${agentKind} in ${paneInfo.pane_id}: ${err.message}`, {
           exit: EXIT.NO_HERDR,
-          hint: `the pane exists; inspect it with \`herdr pane read ${paneInfo.pane_id}\` or close it`,
-          details: { pane_id: paneInfo.pane_id, dispatch_id: dispatch.dispatch_id },
+          hint: cleanup.closed
+            ? `the pane was closed, so nothing is left holding the agent name. Retry with --retry-of ${dispatch.dispatch_id}`
+            : `the pane is still open (${cleanup.reason}) and may be holding the agent name; close it before retrying`,
+          details: {
+            pane_id: paneInfo.pane_id, dispatch_id: dispatch.dispatch_id,
+            pane_closed: cleanup.closed, pane_close_note: cleanup.reason,
+          },
         });
     }
 
@@ -251,10 +263,31 @@ export const start = {
      * timeout for a worker that was never told what to do: the exact silent hang cbds
      * exists to eliminate. So an undelivered contract fails loudly instead.
      */
-    const undelivered = (reason, hint) => {
+    /**
+     * cbds created this pane, so cbds owns cleaning it up when its own launch fails.
+     *
+     * Leaving it open is not neutral: the half-started agent keeps holding its Herdr
+     * agent name, so the retry fails with agent_start_failed and the operator has to
+     * hunt down and close a zombie pane by hand.
+     */
+    const cleanupPane = async (why) => {
+      if (ctx.flags['keep-pane-on-failure']) return { closed: false, reason: 'kept by --keep-pane-on-failure' };
+      if (ctx.flags.pane) return { closed: false, reason: 'operator-owned pane; cbds did not create it' };
+      try {
+        await paneClose(paneInfo.pane_id);
+        appendEvent(R.events, { event: 'dispatch.launch_pane_closed', pane_id: paneInfo.pane_id, why });
+        return { closed: true, reason: null };
+      } catch (err) {
+        return { closed: false, reason: `close failed: ${err.code ?? err.message}` };
+      }
+    };
+
+    const undelivered = async (reason, hint) => {
       dispatch.state = 'abandoned';
       dispatch.authority = false;
-      saveDispatch(store, dispatch, { event: 'dispatch.contract_undelivered', reason });
+      const cleanup = await cleanupPane(reason);
+      dispatch.launch_cleanup = cleanup;
+      saveDispatch(store, dispatch, { event: 'dispatch.contract_undelivered', reason, pane_closed: cleanup.closed });
       return new CbdsError('contract_undelivered',
         `the agent started in ${paneInfo.pane_id} but never received the task (${reason})`, {
           exit: EXIT.CONTRACT_UNDELIVERED,
@@ -262,6 +295,7 @@ export const start = {
           details: {
             pane_id: paneInfo.pane_id, dispatch_id: dispatch.dispatch_id,
             task_id: task.task_id, reason,
+            pane_closed: cleanup.closed, pane_close_note: cleanup.reason,
           },
         });
     };
@@ -287,13 +321,13 @@ export const start = {
         });
         if (promptResult?._allowed) injected = false;
       } catch (err) {
-        throw undelivered(err.code ?? 'prompt_failed',
+        throw await undelivered(err.code ?? 'prompt_failed',
           `retry with --retry-of ${dispatch.dispatch_id} once the pane is usable`);
       }
 
       if (!injected) {
         const reason = promptResult._allowed;
-        throw undelivered(reason, reason === 'agent_blocked'
+        throw await undelivered(reason, reason === 'agent_blocked'
           ? `the agent is sitting at a dialog (a directory-trust prompt is the usual cause). Pre-trust it with \`cbds trust "${cwd}" --agent ${agentKind}\`, or answer the dialog in pane ${paneInfo.pane_id} and pass --wait-ready 120000, then retry with --retry-of ${dispatch.dispatch_id}`
           : `inspect the pane with \`herdr agent read ${agentName}\`, then retry with --retry-of ${dispatch.dispatch_id}`);
       }

@@ -35,8 +35,14 @@ const ID_RE = /^(run|tsk|dsp|rpt)_[0-9a-hjkmnp-tv-z]{13}$/;
 export const isId = (value, prefix) =>
   typeof value === 'string' && ID_RE.test(value) && (!prefix || value.startsWith(`${prefix}_`));
 
-/** Agent names must match Herdr's own rule: [a-z][a-z0-9_-]{0,31}. */
-export const agentNameForDispatch = (taskId, attempt) => {
-  const short = taskId.replace(/^tsk_/, '').slice(-8);
-  return `cbds-${short}-a${attempt}`.slice(0, 32);
-};
+/**
+ * Agent name for a dispatch. Must match Herdr's rule: [a-z][a-z0-9_-]{0,31}.
+ *
+ * Derived from the DISPATCH id, never from the attempt number. Attempt numbers are
+ * not unique in practice: `task.attempts` only increments once a dispatch commits, so
+ * a launch that failed leaves it unchanged and the retry would ask Herdr for a name
+ * the failed attempt's pane is still holding — which fails with agent_start_failed and
+ * looks like a mystery. A dispatch id is unique by construction, so this cannot recur.
+ */
+export const agentNameForDispatch = (dispatchId) =>
+  `cbds-${dispatchId.replace(/^dsp_/, '')}`.slice(0, 32);
