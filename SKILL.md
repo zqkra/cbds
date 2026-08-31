@@ -104,7 +104,13 @@ cbds places workers itself, so you do not have to think about it:
 - while the coordinator's tab holds fewer than **4** panes, the next worker **splits
   into it**, always cutting the largest pane and picking the direction from its aspect
   ratio — so 4 workers land as a 2x2 grid, not four unreadable columns;
-- past that, each worker gets **its own tab**, labelled with the task title.
+- past that, each worker gets **its own tab**.
+
+Tabs are labelled with what makes that task *different* from its siblings, not with a
+raw truncation: a shared prefix and any word most siblings repeat are dropped, cuts
+land on word boundaries, and colliding labels are widened until they separate. Thirty
+tabs reading "Dolly Parton's Fun…" are decoration; "FINAL GOODBYE…", "Family Cry At…",
+"Sister Stella…" are an overview.
 
 ```bash
 cbds dispatch start --task <id> --agent claude                     # auto (default)

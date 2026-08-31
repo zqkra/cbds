@@ -726,3 +726,62 @@ describe('placement', () => {
     assert.equal(res.code, 2);
   });
 });
+
+/* ------------------------------------------------------------ tab labels -- */
+
+describe('labels', () => {
+  const titles = [
+    "Curiozy After Dolly Parton's Death, Her Best Friend Judy Ogle",
+    "Curiozy At Dolly Parton's Funeral, Her Dog Jumped Onto Her Body",
+    "Curiozy Dolly Parton's FINAL GOODBYE - Celebrities BREAK DOWN",
+    "Curiozy Dolly Parton's Funeral - What Cher Just Did",
+    "Curiozy Dolly Parton's Family Cry At Her Grave",
+    "Curiozy Bigi HONORS Michael Jackson's 68th Birthday",
+  ];
+
+  test('a shared prefix is stripped so the visible characters carry information', async () => {
+    const { commonWordPrefix } = await import('../src/core/labels.mjs');
+    assert.equal(commonWordPrefix(titles), 'Curiozy ');
+    assert.equal(commonWordPrefix(['one two', 'three four']), '', 'nothing shared, nothing stripped');
+  });
+
+  test('words most siblings share are dropped — a repeated name is not a label', async () => {
+    const { distinctiveLabel } = await import('../src/core/labels.mjs');
+    const label = distinctiveLabel(titles[2], titles, 24);
+    assert.ok(!label.includes('Dolly'), `"${label}" should not spend space on the shared name`);
+    assert.match(label, /FINAL GOODBYE/);
+  });
+
+  test('it never cuts mid-word or leaves dangling punctuation', async () => {
+    const { clipWords } = await import('../src/core/labels.mjs');
+    const out = clipWords('Dolly Parton Funeral — What Cher Did', 20);
+    assert.ok(out.endsWith('…'));
+    assert.ok(!/[\s,.;:—–-]…$/.test(out), `"${out}" has dangling punctuation`);
+    assert.ok(out.length <= 21);
+    assert.equal(clipWords('short', 20), 'short', 'short titles are left alone');
+  });
+
+  test('it never strips a title down to nothing', async () => {
+    const { distinctiveLabel } = await import('../src/core/labels.mjs');
+    const same = Array.from({ length: 8 }, () => 'Dolly Parton Funeral');
+    const label = distinctiveLabel(same[0], same, 24);
+    assert.ok(label.length > 0, 'an empty tab is worse than a repetitive one');
+  });
+
+  test('collisions are widened until the labels actually differ', async () => {
+    const { distinctiveLabels } = await import('../src/core/labels.mjs');
+    const clashing = [
+      'Curiozy Michael Jackson 68th Birthday — What Bigi Said',
+      'Curiozy Michael Jackson 68th Birthday — What Jaafar Said',
+      'Curiozy Something Else Entirely',
+    ];
+    const out = distinctiveLabels(clashing, 20);
+    assert.equal(new Set(out).size, out.length, `labels must be distinct: ${JSON.stringify(out)}`);
+  });
+
+  test('genuinely identical titles get numbered rather than left ambiguous', async () => {
+    const { distinctiveLabels } = await import('../src/core/labels.mjs');
+    const out = distinctiveLabels(['Same Task', 'Same Task', 'Other'], 20);
+    assert.equal(new Set(out).size, 3);
+  });
+});

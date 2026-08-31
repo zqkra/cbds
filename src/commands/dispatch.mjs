@@ -4,6 +4,7 @@ import { emit, say, table, kv, c, paintState, relTime, truncate } from '../core/
 import {
   loadTask, saveTask, listDispatches, loadDispatch, saveDispatch,
   createDispatch, supersedeDispatch, depsSatisfied, reconcileTaskReadiness, DISPATCH_STATES,
+  listTasks,
 } from '../core/model.mjs';
 import { resolveRun, resolveTaskId, resolveDispatchId } from '../core/context.mjs';
 import { agentNameForDispatch } from '../core/ids.mjs';
@@ -11,6 +12,7 @@ import { appendEvent } from '../core/store.mjs';
 import { buildPreamble, sha256, workerEnv, CONTRACT_LEVELS } from '../herdr/preamble.mjs';
 import { buildAgentArgs, launchKinds } from '../herdr/launch.mjs';
 import { openGatesForTask } from './gate.mjs';
+import { distinctiveLabels } from '../core/labels.mjs';
 import {
   paneSplit, agentStart, agentPrompt, paneLayout, paneGet, paintPane, insideHerdr, callerPane,
   agentKinds, KNOWN_AGENT_KINDS, agentGet, agentWait, paneClose, worktreeCreate, tabCreate,
@@ -191,6 +193,14 @@ export const start = {
     // after reporting (no prompt to reuse), an agent must idle and stay reusable.
     // The sub-dispatch section is omitted entirely unless nesting is actually
     // allowed — a worker told it "usually cannot" delegate still tries.
+    // Label this worker by what makes its task different from its siblings. With a
+    // wave of workers the tab bar is the only overview a person gets, and it is
+    // useless if every tab reads the same.
+    const siblings = listTasks(store, run.run_id);
+    const labels = distinctiveLabels(siblings.map((t) => t.title), 24);
+    const workerLabel = labels[siblings.findIndex((t) => t.task_id === task.task_id)]
+      ?? truncate(task.title, 24);
+
     const contractLevel = oneOf(ctx.flags.contract, CONTRACT_LEVELS, 'contract');
     const preamble = buildPreamble({
       run, task, dispatch,
@@ -250,7 +260,7 @@ export const start = {
       try {
         const res = await worktreeCreate({
           cwd, branch, base: ctx.flags.base ?? null,
-          label: truncate(task.title, 24),
+          label: workerLabel,
         });
         const info = res?.workspace?.worktree ?? res?.worktree ?? {};
         worktree = {
@@ -302,7 +312,7 @@ export const start = {
             workspaceId: callerPane().workspace_id ?? null,
             cwd: workCwd,
             env,
-            label: truncate(task.title, 20),
+            label: workerLabel,
           });
           paneInfo = res?.root_pane ?? res?.pane ?? res;
         } else {
@@ -467,9 +477,9 @@ export const start = {
     saveTask(store, task, { event: 'task.dispatched', dispatch_id: dispatch.dispatch_id });
 
     await paintPane(paneInfo.pane_id, {
-      title: `cbds ${truncate(task.title, 24)}`,
+      title: workerLabel,
       tokens: { cbds: task.task_id.slice(-6), attempt: String(dispatch.attempt) },
-      stateLabels: { working: `cbds working · ${truncate(task.title, 18)}`, idle: 'cbds awaiting report' },
+      stateLabels: { working: `⋯ ${workerLabel}`, idle: '✓ awaiting report' },
     });
 
     appendEvent(R.events, {

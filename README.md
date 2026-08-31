@@ -161,6 +161,18 @@ worker 4-6  ->  own tab                     125x31  125x31
 
 `--placement auto|split|tab` overrides it.
 
+Tabs and panes are labelled by what makes the task *different* from its siblings —
+shared prefixes and words most siblings repeat are dropped, cuts land on word
+boundaries, and colliding labels widen until they separate. With thirty workers the
+tab bar is the only overview a person gets, and it only works if the labels differ:
+
+```
+raw truncation            distinctive label
+Dolly Parton's FINAL GO   FINAL GOODBYE…
+Dolly Parton's Family C   Family Cry At…
+Dolly Parton's Funeral    Funeral — What Cher…
+```
+
 ### Where cbds deliberately differs: the preamble is sized to the task
 
 Orca pushes its full ~1700-token preamble on every dispatch regardless of task size.
