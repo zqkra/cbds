@@ -252,6 +252,28 @@ are not told twice.
 So: prefer to block on `cbds wait`; it is faster, ordered and acknowledges properly.
 But if you end your turn, the report reaches you anyway instead of sitting unread.
 
+### Workers that finish and forget to report
+
+The contract cannot make a model run a command. A worker — especially a smaller or
+faster model — will sometimes do the work, write its findings as prose on its own
+screen, and go idle. The result exists and is unreachable.
+
+`cbds wait` handles this on its own: a worker sitting **idle with an unsettled
+dispatch** has finished and not reported, so it gets one short reminder to summarise
+in a `cbds done` call without redoing the work. Capped at `--max-nudges` (2), after a
+`--nudge-after` grace (25s) so a worker about to report is not interrupted.
+
+By hand, when you are not blocked in `wait`:
+
+```bash
+cbds nudge --all --dry-run     # who finished without reporting?
+cbds nudge --all               # remind them
+```
+
+This is also why a long spec does not get the one-line `bare` contract: `--contract
+auto` falls back to `standard` past ~900 tokens of spec, because a single trailing
+anchor loses against a wall of text — especially a spec that itself says "report".
+
 ### Waiting properly
 
 `--timeout` is mandatory. cbds never waits forever.

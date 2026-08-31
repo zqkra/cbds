@@ -1027,3 +1027,58 @@ describe('a report is never left unread', () => {
     assert.equal(res.json.data.notified, null);
   });
 });
+
+/* --------------------------------- a worker that forgets to report is recovered -- */
+
+describe('done-but-silent workers', () => {
+  test('auto keeps the full contract when the spec would bury a one-line anchor', async () => {
+    const home = tmpProject();
+    const dir = tmpProject();
+    await cliJson(process.cwd(), ['skill', 'install', '--agent', 'claude'], { HOME: home });
+    await cliJson(dir, ['run', 'create', '--objective', 'long']);
+
+    const short = (await cliJson(dir, ['task', 'create', '--spec', 'Hola.'])).json.data.task_id;
+    const shortRes = await cliJson(dir, ['dispatch', 'start', '--task', short, '--agent', 'claude', '--dry-run'], { HOME: home });
+    assert.equal(shortRes.json.data.contract, 'bare');
+
+    // A spec long enough that a single trailing line stops competing with it.
+    const longSpec = `${'Do the thing carefully. '.repeat(200)}\n# Al reportar\nDi qué comandos corriste.`;
+    const long = (await cliJson(dir, ['task', 'create', '--spec', longSpec])).json.data.task_id;
+    const longRes = await cliJson(dir, ['dispatch', 'start', '--task', long, '--agent', 'claude', '--dry-run'], { HOME: home });
+    assert.equal(longRes.json.data.contract, 'standard',
+      'a long spec must not be paired with a one-line anchor');
+    assert.match(longRes.json.data.contract_reason, /buried/);
+  });
+
+  test('nudge needs a target and refuses a settled dispatch', async () => {
+    const dir = tmpProject();
+    const runId = (await cliJson(dir, ['run', 'create', '--objective', 'n'])).json.data.run_id;
+    const taskId = (await cliJson(dir, ['task', 'create', '--spec', 'w'])).json.data.task_id;
+    const dispatchId = await makeDispatch(dir, runId, taskId);
+
+    assert.equal((await cliJson(dir, ['nudge'])).code, 3, 'no target is an error, not a no-op');
+
+    await cliJson(dir, ['done', '--run', runId, '--task-id', taskId,
+      '--dispatch-id', dispatchId, '--outcome', 'succeeded', '--body', 'b', '--no-notify']);
+    const res = await cliJson(dir, ['nudge', dispatchId]);
+    assert.equal(res.code, 7, 'a settled dispatch must not be nudged');
+  });
+
+  test('a reminder is counted, so a worker is not pestered forever', async () => {
+    const dir = tmpProject();
+    const runId = (await cliJson(dir, ['run', 'create', '--objective', 'n'])).json.data.run_id;
+    const taskId = (await cliJson(dir, ['task', 'create', '--spec', 'w'])).json.data.task_id;
+    const dispatchId = await makeDispatch(dir, runId, taskId);
+
+    const { nudgeDispatch } = await import('../src/commands/nudge.mjs');
+    const { openStore } = await import('../src/core/store.mjs');
+    const { loadDispatch } = await import('../src/core/model.mjs');
+    const store = openStore(path.join(dir, '.cbds'));
+
+    await nudgeDispatch(store, loadDispatch(store, runId, dispatchId));
+    assert.equal(loadDispatch(store, runId, dispatchId).nudges, 1);
+    await nudgeDispatch(store, loadDispatch(store, runId, dispatchId));
+    assert.equal(loadDispatch(store, runId, dispatchId).nudges, 2,
+      'the count is what lets wait stop after --max-nudges');
+  });
+});

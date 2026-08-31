@@ -1,6 +1,6 @@
 {
   "name": "cbds",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Reliable multi-agent orchestration for the Herdr herd.",
   "type": "module",
   "bin": { "cbds": "./bin/cbds" },

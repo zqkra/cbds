@@ -223,7 +223,18 @@ export const start = {
       if (bareShell) {
         contractLevel = 'standard'; contractReason = 'bare shell has no skill to rely on';
       } else if (skillInstalledFor(agentKind)) {
-        contractLevel = 'bare'; contractReason = `${agentKind} has the cbds skill installed`;
+        // One trailing line loses against a long spec — especially one that itself
+        // talks about "reporting", which a smaller model reads as "write prose".
+        // Seen in the wild: the worker did the work, wrote its findings on its own
+        // screen addressing the coordinator by name, and went idle.
+        const specTokens = Math.round(Buffer.byteLength(task.spec) / 4);
+        if (specTokens > 900) {
+          contractLevel = 'standard';
+          contractReason = `${agentKind} has the skill, but the spec is ~${specTokens} tokens — a one-line anchor gets buried`;
+        } else {
+          contractLevel = 'bare';
+          contractReason = `${agentKind} has the cbds skill installed`;
+        }
       } else {
         contractLevel = 'standard';
         contractReason = skillKinds().includes(agentKind)

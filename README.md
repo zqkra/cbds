@@ -147,6 +147,28 @@ It never passes ids — they come from its pane environment.
 
 ---
 
+## A worker that forgets to report is recovered
+
+The contract cannot make a model run a command. Observed in a real run on a small
+model: the worker wrote the code, ran 151 tests, then printed its findings as prose on
+its own screen — addressing the coordinator by name — and went idle. The result
+existed and was unreachable.
+
+That state is detectable: **agent idle, dispatch unsettled** means finished and not
+reported. `cbds wait` sweeps for it and sends one short reminder; the worker
+summarises in a `cbds done` call without redoing the work. In the run above it
+reported 10 seconds later, in full.
+
+```bash
+cbds nudge --all --dry-run     # who finished without reporting?
+cbds nudge --all               # remind them
+```
+
+Capped at 2 reminders after a 25s grace, so a worker about to report is not
+interrupted and one that ignores two is left to the timeout. Related: `--contract
+auto` will not pair a one-line anchor with a spec over ~900 tokens, because a single
+trailing line loses against a wall of text.
+
 ## A report cannot go unread
 
 `cbds wait` is the receive primitive, but a coordinator that ends its turn instead of
@@ -311,6 +333,7 @@ cbds trust         # pre-trust a directory so agents don't stall on a trust dial
 cbds contract      # the full worker protocol, pulled on demand
 cbds skill status|install   # put the protocol in each agent, so dispatches go bare
 cbds say / spawn / who      # plain messaging: no task, no contract, just the text
+cbds nudge                  # remind workers that finished without reporting
 cbds gate create|list|resolve|cancel   # coordinator decisions that block a task
 cbds whoami        # worker self-check: am I really live?
 cbds status        # what am I, what is live

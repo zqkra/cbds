@@ -8,6 +8,7 @@ import {
 import { resolveRun, resolveTaskId, resolveDispatchId } from '../core/context.mjs';
 import { watchPaneDeath } from '../herdr/events.mjs';
 import { register as registerWaiter } from '../core/waiters.mjs';
+import { forgetfulDispatches, nudgeDispatch } from './nudge.mjs';
 import { paneAlive } from '../herdr/client.mjs';
 
 /**
@@ -37,6 +38,9 @@ export const wait = {
     unacked: { type: 'boolean', default: true, describe: 'only consider reports newer than the cursor' },
     poll: { type: 'number', default: 2000, placeholder: 'ms', describe: 'safety poll interval' },
     hints: { type: 'boolean', default: true, describe: 'use Herdr pane events to fail fast' },
+    nudge: { type: 'boolean', default: true, describe: 'remind a worker that went idle without reporting' },
+    'nudge-after': { type: 'number', default: 25000, placeholder: 'ms', describe: 'grace before the first reminder' },
+    'max-nudges': { type: 'number', default: 2, describe: 'reminders per worker before giving up on it' },
   },
   async run(ctx) {
     const timeout = ctx.flags.timeout;
@@ -121,6 +125,35 @@ export const wait = {
     /* ---- hint channel: fail fast if a worker pane dies ---- */
 
     let vanished = null;
+    /**
+     * Recover a worker that finished its turn without reporting.
+     *
+     * The contract cannot make a model run a command, and a smaller one will happily
+     * write its findings as prose on its own screen and go idle — the result exists
+     * and is unreachable. That state is detectable (agent idle, dispatch unsettled),
+     * so one short reminder recovers it without redoing the work.
+     *
+     * Slow and capped on purpose: the grace period lets a worker that is about to
+     * report do so, and one that ignores two reminders will not answer a third —
+     * that is what the timeout is for.
+     */
+    let nudgeTimer = null;
+    if (ctx.flags.nudge) {
+      const sweep = async () => {
+        try {
+          for (const { dispatch: d, status } of await forgetfulDispatches(store, run.run_id)) {
+            if (!scopeIds.has(d.dispatch_id)) continue;
+            if ((d.nudges ?? 0) >= ctx.flags['max-nudges']) continue;
+            if (Date.now() - new Date(d.started_at).getTime() < ctx.flags['nudge-after']) continue;
+            await nudgeDispatch(store, d, status);
+            if (!ctx.json) say(ctx, c.dim(`  reminded ${d.target.agent_name ?? d.target.pane_id}: idle without a report`));
+          }
+        } catch { /* best-effort; a reminder must never break the wait */ }
+      };
+      nudgeTimer = setInterval(sweep, Math.max(10_000, ctx.flags['nudge-after']));
+      setTimeout(sweep, ctx.flags['nudge-after']).unref?.();
+    }
+
     // Recreated on every loop iteration: an AbortController latches, so reusing one
     // after a spurious pane event would make the next wait return instantly forever.
     let controller = new AbortController();
@@ -194,6 +227,7 @@ export const wait = {
       }
     } finally {
       unregister();
+      if (nudgeTimer) clearInterval(nudgeTimer);
       for (const w of watchers) { try { w.stop(); } catch { /* already stopped */ } }
     }
 
