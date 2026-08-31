@@ -147,6 +147,27 @@ It never passes ids — they come from its pane environment.
 
 ---
 
+## Teaching the worker, not just catching it
+
+The recovery below exists because the rule can be missed. The rule itself was the
+actual fix.
+
+A worker's task spec very often ends with a section headed **"Report"**, **"Al
+reportar"** or **"When finished"** — and a smaller model reads that as *write prose*.
+It does the work, prints a careful summary on its own screen, and stops. So both the
+skill and the preamble now say the thing that was missing:
+
+> Writing a summary on your screen is **not** reporting — nobody reads your screen. If
+> the task has a section headed "Report" / "Al reportar" / "When finished", that
+> describes what belongs in `--body`. Put it **inside** the `cbds done` command.
+
+The skill leads with it, before anything a worker might skim past, and its frontmatter
+now triggers on *receiving* a dispatch rather than only on orchestrating one — a worker
+that never loads the skill cannot follow it.
+
+Re-run of the exact spec shape that failed: reported in 20s, zero reminders needed,
+with the "Al reportar" content correctly inside `--body`.
+
 ## A worker that forgets to report is recovered
 
 The contract cannot make a model run a command. Observed in a real run on a small

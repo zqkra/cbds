@@ -4,10 +4,12 @@ description: >-
   Use cbds for reliable multi-agent orchestration inside Herdr: dispatching tasks to
   worker panes and receiving authoritative completion reports. Use it whenever the user
   asks you to supervise, monitor, wait for, track, coordinate, or collect results from
-  other agents, or to split work across several Herdr panes and report back. Do NOT use
-  it for a plain handoff ("hand this to another agent", "open a pane and run X") where
-  nobody is waiting for a result — use the plain `herdr` skill for that. Requires the
-  `cbds` CLI and a running Herdr session.
+  other agents, or to split work across several Herdr panes and report back. ALSO read
+  this whenever a prompt you received contains a `[cbds dispatch …]` line — you are a
+  worker under a reporting contract and must finish with `cbds done`. Do NOT use the
+  dispatch half for a plain handoff ("hand this to another agent", "open a pane and run
+  X") where nobody is waiting on a result — `cbds say`/`cbds spawn` are for that.
+  Requires the `cbds` CLI and a running Herdr session.
 ---
 
 # cbds
@@ -19,6 +21,63 @@ Herdr can send work to another pane. What it cannot do reliably is tell you the 
 reads race and lose scrollback on the alternate screen; a `DONE` sentinel in the
 transcript is unauthenticated. cbds fixes the receive side with a completion contract:
 the worker writes an authoritative, ID-matched report to disk, and you read it.
+
+---
+
+# ⚠ IF YOUR PROMPT CONTAINED `[cbds dispatch …]`, READ THIS FIRST
+
+You are a **worker**. A coordinator is blocked waiting on you right now.
+
+## Writing a summary is NOT reporting
+
+This is the one mistake that wastes everything. Your work is finished, you write a
+clear summary on your screen — maybe even addressed to the coordinator — and you stop.
+
+**Nobody reads your screen.** The coordinator is a separate process in a separate pane.
+Text you print reaches no one. Only this command does:
+
+```bash
+cbds done --outcome succeeded --subject "<one line>" --body "<what you did, what you found, what remains>"
+```
+
+Your task spec may contain a section headed **"Report"**, **"Al reportar"**, **"When
+finished"** or similar. That is not a request for prose. It describes *what to put in
+the `--body`*. Do both: put that content **inside the command**.
+
+> This has already happened here: a worker wrote the code, ran 151 tests, then printed
+> its findings starting with *"Important for the orchestrator:"* and went idle. The work
+> was done, correct, and unreachable. Do not be that worker.
+
+## The whole contract, four rules
+
+1. **Do the task.**
+2. **Report exactly once — including on failure.** Never encode failure only in prose;
+   an unreported failure is indistinguishable from a hung worker.
+   ```bash
+   cbds done --outcome succeeded --subject "<short>" --body "<did / found / remains>"
+   cbds done --outcome failed    --subject "<short>" --body "<why, and what you tried>"
+   cbds done --outcome blocked   --subject "<short>" --question "<exactly what you need>"
+   ```
+   The ids come from this pane's environment — you never pass them.
+3. **Never ask a human through your own UI** (AskUserQuestion, a TUI confirm, a y/n
+   prompt). The coordinator cannot see it and you hang forever. Use `cbds ask` to ask
+   and wait, or `--outcome blocked` to hand the question over and end your turn.
+4. **After reporting: stop and idle.** Do not start new work, do not poll, do not close
+   your pane.
+
+## Before you stop, check yourself
+
+Ask: *did I run `cbds done`?* If you only wrote a summary, the answer is no — run it now
+with that summary as the `--body`. You will not be repeating the work.
+
+If you are unsure the dispatch is still live (a preamble inherited from scrollback, a
+handoff), run `cbds whoami`. If it does not say you are a **live** worker, do not report
+— tell the user instead.
+
+Longer jobs: `cbds heartbeat --phase <x>` every ~5 min, `cbds escalate` for a blocker
+you cannot pass, `cbds check` for guidance sent to you. Full protocol: `cbds contract`.
+
+---
 
 ## The relationship, in one paragraph
 
@@ -33,32 +92,6 @@ Each side knows who the other is. The worker's pane carries `CBDS_COORDINATOR`, 
 preamble names the coordinator, and `cbds whoami` prints it. The coordinator sees each
 worker by a readable name derived from its task — `fix-the-footer-overlap-vzdn`, not an
 opaque id — which is also how you address it: `cbds say fix-the-footer-overlap-vzdn "…"`.
-
-## Got a cbds dispatch? Start here (worker fast path)
-
-A dispatch usually arrives **bare** — the task, then one anchor line like:
-
-```
-[cbds dispatch m1bh7q… — when done: cbds done --outcome succeeded --body "<summary>"]
-```
-
-That line means a coordinator is blocked waiting on you, and your identity is already
-in this pane's environment. The whole protocol, in four rules:
-
-1. Do the task.
-2. Report **exactly once**, including on failure — never encode failure only in prose:
-   ```bash
-   cbds done --outcome succeeded --subject "<short>" --body "<what you did, found, what remains>"
-   cbds done --outcome failed    --subject "<short>" --body "<why, and what you tried>"
-   cbds done --outcome blocked   --subject "<short>" --question "<exactly what you need>"
-   ```
-3. **Never ask through your own interactive UI** (AskUserQuestion, a TUI confirm, a y/n
-   prompt). The coordinator cannot see it and you will hang forever. Use `cbds ask` for a
-   blocking question, or `--outcome blocked`.
-4. After reporting, stop and idle at your prompt. Do not close the pane.
-
-Unsure whether the dispatch is still live (stale scrollback, a handoff)? `cbds whoami`.
-Need heartbeat / ask / escalate / check? See **Worker** below, or run `cbds contract`.
 
 ## First: which verb? (get this wrong and you waste everyone's time)
 

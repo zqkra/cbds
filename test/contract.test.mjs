@@ -1082,3 +1082,37 @@ describe('done-but-silent workers', () => {
       'the count is what lets wait stop after --max-nudges');
   });
 });
+
+/* -------------------------------- the rule the wild failure needed -- */
+
+describe('prose is not a report', () => {
+  test('the preamble says so explicitly, at every level that carries rules', async () => {
+    const { buildPreamble } = await import('../src/herdr/preamble.mjs');
+    const sample = {
+      run: { run_id: 'r', objective: 'o' },
+      task: { task_id: 't', title: 'T', spec: 'x\n\n# Al reportar\ndi qué corriste', max_attempts: 3 },
+      dispatch: { dispatch_id: 'dsp_x', attempt: 1 },
+    };
+    for (const contract of ['standard', 'full']) {
+      const p = buildPreamble({ ...sample, contract });
+      assert.match(p, /NOT reporting|not reporting/i, `${contract}: must say prose is not a report`);
+      assert.match(p, /Al reportar/, `${contract}: must name the spec heading that caused this`);
+      assert.match(p, /--body/, `${contract}: must point the content at --body`);
+    }
+  });
+
+  test('the skill leads with it, before anything a worker might skim past', async () => {
+    const { SKILL_SOURCE } = await import('../src/core/skills.mjs');
+    const text = fs.readFileSync(SKILL_SOURCE, 'utf8');
+    const rule = text.indexOf('Writing a summary is NOT reporting');
+    assert.ok(rule > 0, 'the skill must carry the rule');
+
+    const orchestrator = text.indexOf('## Orchestrator');
+    assert.ok(rule < orchestrator, 'it must come before the orchestrator half');
+    assert.ok(rule < 4000, `it must be near the top, found at char ${rule}`);
+
+    // The description is what routes an agent into the skill at all.
+    assert.match(text.slice(0, text.indexOf('---', 4)), /cbds dispatch/,
+      'the frontmatter must trigger on receiving a dispatch, not only on orchestrating');
+  });
+});

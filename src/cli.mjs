@@ -21,7 +21,7 @@ import * as skillCmd from './commands/skill.mjs';
 import { talkSay, talkSpawn, who } from './commands/talk.mjs';
 import { nudge } from './commands/nudge.mjs';
 
-export const VERSION = '2.2.0';
+export const VERSION = '2.3.0';
 
 /** Flags accepted by every command. */
 const GLOBAL_FLAGS = {

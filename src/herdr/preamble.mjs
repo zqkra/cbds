@@ -86,6 +86,9 @@ const reportBlock = (c) => [
 ];
 
 const hardRules = (c) => [
+  'Writing a summary on your screen is NOT reporting — nobody reads your screen. If the',
+  'task below has a section headed "Report" / "Al reportar" / "When finished", that',
+  `describes what to put in --body; put it INSIDE the ${c} done command.`,
   'Never encode failure only in prose: an unreported failure is indistinguishable',
   'from a hung worker. Never ask through your own interactive UI (AskUserQuestion, a',
   'TUI confirm, a y/n prompt) — the coordinator cannot see it and you will hang.',
@@ -208,6 +211,11 @@ comments, a chat tool, or any other channel to reach a human during this run.
   # done, --outcome failed when it is not. Never encode failure only in prose and
   # never silently stop: an unreported failure is indistinguishable from a hung
   # worker and burns the coordinator's entire timeout.
+  #
+  # RULE: writing a summary on your screen is NOT reporting — nobody reads your screen,
+  # the coordinator is a separate process. If the TASK below has a section headed
+  # "Report" / "Al reportar" / "When finished", that describes what belongs in --body.
+  # Put that content INSIDE this command.
   #
   # The ids are already in this pane's environment, so you do not pass them.
   ${c} done --outcome succeeded --subject "<short status>" --body "<3-sentence summary>" --files-modified "path/a,path/b"
