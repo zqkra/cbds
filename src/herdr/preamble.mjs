@@ -138,7 +138,10 @@ export const buildPreamble = ({
     return [
       task.spec,
       '',
-      `[cbds dispatch${who ? ` from ${who}` : ''} — reply with: ${c} done --outcome succeeded --body "<summary>"]`,
+      // Marker + who + verb. Nothing more: `bare` is only chosen when the worker has
+      // the cbds skill, which already carries the flags. Spelling out
+      // `--outcome succeeded` here also quietly biases toward reporting success.
+      `[cbds dispatch${who ? ` from ${who}` : ''} — report with \`${c} done\` when finished]`,
     ].join('\n');
   }
 

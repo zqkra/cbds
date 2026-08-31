@@ -273,11 +273,20 @@ export const start = {
     if (ctx.flags.trust && !bareShell) {
       // Opt-in only. A directory-trust dialog is the most common way a dispatched
       // worker never receives its task, and a fresh git worktree hits it every time.
-      const { trust: trustCmd } = await import('./trust.mjs');
-      await trustCmd.run({
-        ...ctx, commandName: 'trust', json: false, quiet: true,
-        flags: { agent: agentKind }, positional: [workCwd],
-      });
+      //
+      // But trust is a PRECAUTION, not a precondition: only some CLIs gate on it, and
+      // cbds only manages the ones whose trust store it has actually verified. Failing
+      // the whole dispatch because the target agent has no trust gate would be absurd,
+      // so an unmanaged kind is skipped with a note.
+      const { trust: trustCmd, MANAGED_KINDS } = await import('./trust.mjs');
+      if (MANAGED_KINDS.includes(agentKind)) {
+        await trustCmd.run({
+          ...ctx, commandName: 'trust', json: false, quiet: true,
+          flags: { agent: agentKind }, positional: [workCwd],
+        });
+      } else {
+        say(ctx, c.dim(`  --trust skipped: cbds does not manage a trust store for ${agentKind} (only ${MANAGED_KINDS.join(', ')})`));
+      }
     }
 
     /* ---- isolate the worker in its own worktree, if asked ---- */

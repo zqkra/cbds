@@ -77,6 +77,8 @@ const AGENTS = {
   },
 };
 
+export const MANAGED_KINDS = Object.keys(AGENTS);
+
 /**
  * Locate a `[projects."<dir>"]` table by scanning lines rather than matching a regex
  * built from a path. Paths contain regex metacharacters and quotes, and the escaping

@@ -551,8 +551,12 @@ describe('contract levels', () => {
     const lines = p.split('\n').filter(Boolean);
     assert.equal(lines[0], 'Hola.', 'the task comes first, verbatim');
     assert.equal(lines.length, 2, `exactly task + anchor, got ${JSON.stringify(lines)}`);
-    assert.match(lines[1], /cbds done --outcome succeeded --body/);
-    assert.ok(Buffer.byteLength(p) - Buffer.byteLength('Hola.') < 140,
+    // Marker + verb only. No flag template: `bare` is only used when the worker has
+    // the skill, and spelling out `--outcome succeeded` biases toward reporting success.
+    assert.match(lines[1], /^\[cbds dispatch/);
+    assert.match(lines[1], /cbds done/);
+    assert.ok(!lines[1].includes('--outcome'), `the anchor must not template the flags: ${lines[1]}`);
+    assert.ok(Buffer.byteLength(p) - Buffer.byteLength('Hola.') < 110,
       'the anchor overhead must stay tiny — that is the whole point');
   });
 
@@ -954,5 +958,15 @@ describe('an unanswered question is never silent', () => {
     await cliJson(dir, ['reply', '--id', questionId, '--body', 'shared']);
     const after = await cliJson(dir, ['status']);
     assert.equal(after.json.data.runs[0].open_questions.length, 0);
+  });
+});
+
+
+describe('--trust never aborts a dispatch', () => {
+  test('an agent kind cbds does not manage is skipped, not fatal', async () => {
+    const { MANAGED_KINDS } = await import('../src/commands/trust.mjs');
+    assert.deepEqual(MANAGED_KINDS, ['claude', 'codex']);
+    assert.ok(!MANAGED_KINDS.includes('pi'),
+      'pi has no trust gate cbds manages — dispatching to it with --trust must still work');
   });
 });
