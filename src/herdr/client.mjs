@@ -114,6 +114,23 @@ export const paneClose = (paneId) => herdr(['pane', 'close', paneId], { allow: [
 export const paneRead = (paneId, { source = 'recent-unwrapped', lines = 2000 } = {}) =>
   herdrText(['pane', 'read', paneId, '--source', source, '--lines', String(lines)]);
 
+/**
+ * Create a tab with the cbds environment already injected into its root pane.
+ *
+ * This is what lets a worker get a whole tab instead of another sliver of the
+ * coordinator's: `tab create` accepts --env, so the returned root_pane IS the worker
+ * pane. No split, no wasted shell.
+ */
+export const tabCreate = ({ workspaceId = null, cwd = null, env = {}, label = null }) => {
+  const args = ['tab', 'create'];
+  if (workspaceId) args.push('--workspace', workspaceId);
+  if (cwd) args.push('--cwd', cwd);
+  if (label) args.push('--label', label);
+  for (const [k, v] of Object.entries(env)) args.push('--env', `${k}=${v}`);
+  args.push('--no-focus');
+  return herdr(args, { timeoutMs: 30_000 });
+};
+
 export const paneSplit = async ({ targetPaneId = null, direction = 'right', cwd = null, env = {}, focus = false, ratio = null }) => {
   const args = ['pane', 'split'];
   if (targetPaneId) args.push('--pane', targetPaneId); else args.push('--current');

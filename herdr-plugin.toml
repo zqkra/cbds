@@ -5,7 +5,7 @@
 
 id = "dev.cbds.cbds"
 name = "cbds"
-version = "1.4.0"
+version = "1.5.0"
 min_herdr_version = "0.8.0"
 description = "Reliable multi-agent orchestration for the Herdr herd: durable tasks, authoritative worker reports, and a wait that cannot hang."
 platforms = ["linux", "macos", "windows"]

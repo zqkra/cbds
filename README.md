@@ -146,6 +146,21 @@ It never passes ids — they come from its pane environment.
 task complete: those events are a closed built-in set and are not durable across a server
 restart, so they are structurally unfit to carry a completion signal.
 
+### Workers are placed, not piled
+
+Splitting the coordinator's pane for every worker ends in a tab of 10-character
+strips. cbds places them instead: while the tab holds fewer than `--max-per-tab` (4)
+panes the worker splits into it — always cutting the largest pane, with the direction
+taken from its aspect ratio, so four workers form a 2x2 grid — and past that each
+worker gets its own labelled tab.
+
+```
+worker 1-3  ->  split      area 251x62  ->  126x31  126x31
+worker 4-6  ->  own tab                     125x31  125x31
+```
+
+`--placement auto|split|tab` overrides it.
+
 ### Where cbds deliberately differs: the preamble is sized to the task
 
 Orca pushes its full ~1700-token preamble on every dispatch regardless of task size.

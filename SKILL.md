@@ -97,6 +97,24 @@ The optional verbs are *pulled*, not pushed.
 Rule of thumb: if the task spec is shorter than the protocol, the protocol is too big.
 A one-line task under `full` is ~178x more protocol than work.
 
+### Where the workers go on screen
+
+cbds places workers itself, so you do not have to think about it:
+
+- while the coordinator's tab holds fewer than **4** panes, the next worker **splits
+  into it**, always cutting the largest pane and picking the direction from its aspect
+  ratio — so 4 workers land as a 2x2 grid, not four unreadable columns;
+- past that, each worker gets **its own tab**, labelled with the task title.
+
+```bash
+cbds dispatch start --task <id> --agent claude                     # auto (default)
+cbds dispatch start --task <id> --agent claude --placement tab     # always its own tab
+cbds dispatch start --task <id> --agent claude --max-per-tab 2     # crowd less
+```
+
+Only override this if the user asks. Forcing `--placement split` for a wave of eight
+workers is how you get a tab of 10-character strips nobody can read.
+
 ### Parallel work on one repo: isolate it
 
 **Two workers dispatched into the same checkout edit the same files and clobber each

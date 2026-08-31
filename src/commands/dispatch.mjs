@@ -13,24 +13,59 @@ import { buildAgentArgs, launchKinds } from '../herdr/launch.mjs';
 import { openGatesForTask } from './gate.mjs';
 import {
   paneSplit, agentStart, agentPrompt, paneLayout, paneGet, paintPane, insideHerdr, callerPane,
-  agentKinds, KNOWN_AGENT_KINDS, agentGet, agentWait, paneClose, worktreeCreate,
+  agentKinds, KNOWN_AGENT_KINDS, agentGet, agentWait, paneClose, worktreeCreate, tabCreate,
 } from '../herdr/client.mjs';
 
 /**
- * Herdr's own guidance: split a wide pane to the right, a narrow or tall one down.
- * Repeated same-direction splits produce unusable columns, so this is worth doing.
+ * Terminal cells are about twice as tall as they are wide, so a pane only *looks*
+ * square at roughly width = 2.5 x height. Splitting right below that threshold is
+ * what produces the unusable 10-column strips: each split halves the width again
+ * while the height never changes.
  */
-const chooseDirection = async (paneId) => {
-  try {
-    const layout = await paneLayout(paneId);
-    const pane = layout?.layout ?? layout?.pane ?? layout;
-    const cols = pane?.columns ?? pane?.width ?? pane?.cols;
-    const rows = pane?.rows ?? pane?.height;
-    if (typeof cols === 'number' && typeof rows === 'number') {
-      return cols >= rows * 2.2 ? 'right' : 'down';
-    }
-  } catch { /* fall through to the safe default */ }
-  return 'right';
+const WIDE_ENOUGH_TO_SPLIT_RIGHT = 2.5;
+
+/**
+ * Choose where to put the next pane so the tab ends up a grid rather than a row.
+ *
+ * Always splits the LARGEST pane, and picks the direction from that pane's own
+ * aspect ratio. On a full-width tab that gives right, then down, then down again —
+ * a 2x2 — instead of four slivers side by side.
+ */
+export const planSplit = (layout) => {
+  const panes = layout?.panes ?? [];
+  if (!panes.length) return null;
+  const area = (p) => (p.rect?.width ?? 0) * (p.rect?.height ?? 0);
+  const target = panes.reduce((best, p) => (area(p) > area(best) ? p : best), panes[0]);
+  const { width = 0, height = 1 } = target.rect ?? {};
+  return {
+    paneId: target.pane_id,
+    direction: width > height * WIDE_ENOUGH_TO_SPLIT_RIGHT ? 'right' : 'down',
+  };
+};
+
+/**
+ * Decide how to place this worker.
+ *
+ * Splitting forever is what buries a coordinator under 10-character strips. Past a
+ * handful of panes a tab stops being readable no matter how it is arranged, so
+ * beyond that each worker gets its own tab — which is how Herdr expects several
+ * agents to be organised anyway.
+ */
+export const planPlacement = async ({ placement, maxPerTab, fromPaneId }) => {
+  if (placement === 'tab') return { mode: 'tab', reason: 'requested' };
+  if (placement === 'split') {
+    const layout = (await paneLayout(fromPaneId).catch(() => null))?.layout;
+    return { mode: 'split', split: planSplit(layout), reason: 'requested' };
+  }
+
+  // auto
+  const layout = (await paneLayout(fromPaneId).catch(() => null))?.layout;
+  if (!layout) return { mode: 'tab', reason: 'layout unavailable' };
+  const count = layout.panes?.length ?? 1;
+  if (count >= maxPerTab) {
+    return { mode: 'tab', reason: `tab already holds ${count} pane(s), limit ${maxPerTab}` };
+  }
+  return { mode: 'split', split: planSplit(layout), reason: `${count}/${maxPerTab} panes in this tab` };
 };
 
 export const start = {
@@ -40,7 +75,9 @@ export const start = {
     task: { type: 'string', placeholder: 'task_id', describe: 'the task to dispatch' },
     agent: { type: 'string', describe: `agent kind: ${KNOWN_AGENT_KINDS.slice(0, 6).join('|')}|… (any kind your Herdr supports)` },
     pane: { type: 'string', placeholder: 'pane_id', describe: 'attach to an existing pane instead of splitting' },
-    direction: { type: 'string', describe: 'right|down (default: chosen from pane geometry)' },
+    placement: { type: 'string', default: 'auto', describe: 'auto | split | tab — auto splits while the tab is uncrowded, then gives each worker its own tab' },
+    'max-per-tab': { type: 'number', default: 4, describe: 'how many panes a tab may hold before workers get their own tab' },
+    direction: { type: 'string', describe: 'force right|down (implies --placement split)' },
     cwd: { type: 'string', placeholder: 'path', describe: 'working directory for the worker' },
     worktree: { type: 'string', default: 'current', describe: 'current | new — `new` gives this worker an isolated git worktree so parallel workers cannot clobber each other' },
     branch: { type: 'string', describe: 'branch for --worktree new (default: cbds/<task>)' },
@@ -243,23 +280,43 @@ export const start = {
     /* ---- place the worker ---- */
 
     let paneInfo;
+    let placement = null;
     try {
       if (ctx.flags.pane) {
         const got = await paneGet(ctx.flags.pane);
         paneInfo = got?.pane ?? got;
         if (!paneInfo?.pane_id) throw noHerdr(`pane ${ctx.flags.pane} not found`);
       } else {
-        const direction = ctx.flags.direction
-          ? oneOf(ctx.flags.direction, ['right', 'down'], 'direction')
-          : await chooseDirection(splitFrom);
         const env = workerEnv({ run, task, dispatch, stateDir: ctx.stateRoot, depth: depth + 1 });
-        const res = await paneSplit({
-          targetPaneId: splitFrom,
-          direction, cwd: workCwd, env,
-          focus: ctx.flags.focus,
-          ratio: ctx.flags.ratio ?? null,
+        const requested = ctx.flags.direction ? 'split' : oneOf(ctx.flags.placement, ['auto', 'split', 'tab'], 'placement');
+        placement = await planPlacement({
+          placement: requested,
+          maxPerTab: ctx.flags['max-per-tab'],
+          fromPaneId: splitFrom,
         });
-        paneInfo = res?.pane ?? res;
+
+        if (placement.mode === 'tab') {
+          // `tab create` takes --env, so the tab's root pane IS the worker pane:
+          // a whole tab, no split, and no idle shell left over.
+          const res = await tabCreate({
+            workspaceId: callerPane().workspace_id ?? null,
+            cwd: workCwd,
+            env,
+            label: truncate(task.title, 20),
+          });
+          paneInfo = res?.root_pane ?? res?.pane ?? res;
+        } else {
+          const direction = ctx.flags.direction
+            ? oneOf(ctx.flags.direction, ['right', 'down'], 'direction')
+            : (placement.split?.direction ?? 'right');
+          const res = await paneSplit({
+            targetPaneId: placement.split?.paneId ?? splitFrom,
+            direction, cwd: workCwd, env,
+            focus: ctx.flags.focus,
+            ratio: ctx.flags.ratio ?? null,
+          });
+          paneInfo = res?.pane ?? res;
+        }
       }
     } catch (err) {
       supersedeDispatch(store, dispatch, `pane creation failed: ${err.code ?? 'error'}`);
@@ -427,6 +484,9 @@ export const start = {
       ['pane', paneInfo.pane_id],
       ['attempt', `${dispatch.attempt} of ${task.max_attempts}`],
       ['cwd', workCwd],
+      ['placement', placement
+        ? `${placement.mode === 'tab' ? c.cyan('own tab') : `split ${placement.split?.direction ?? ''}`}  ${c.dim(`(${placement.reason})`)}`
+        : c.dim('existing pane')],
       ['worktree', worktree ? `${c.green(worktree.branch)}  ${c.dim(worktree.checkout_path ?? '')}` : c.dim('current (shared checkout)')],
       ['launch', [ctx.flags.model && `model=${ctx.flags.model}`, ctx.flags.effort && `effort=${ctx.flags.effort}`,
         (ctx.passthrough ?? []).length && `args=${ctx.passthrough.join(' ')}`].filter(Boolean).join('  ') || null],
@@ -445,6 +505,7 @@ export const start = {
       pane: { pane_id: paneInfo.pane_id, workspace_id: paneInfo.workspace_id ?? null, tab_id: paneInfo.tab_id ?? null },
       agent: { name: agentKind ? agentName : null, kind: agentKind, ready: agentReady, bare_shell: bareShell },
       worktree,
+      placement,
       injected,
       contract: contractLevel,
       preamble_tokens_approx: Math.round(Buffer.byteLength(preamble) / 4),

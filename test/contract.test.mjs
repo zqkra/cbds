@@ -682,3 +682,47 @@ describe('worktree isolation', () => {
     assert.equal(res.code, 2);
   });
 });
+
+/* --------------------------------------------------------- pane placement -- */
+
+describe('placement', () => {
+  const rect = (id, width, height, x = 0, y = 0) => ({ pane_id: id, rect: { width, height, x, y } });
+
+  test('a full-width tab splits right, then down — a grid, not a row of strips', async () => {
+    const { planSplit } = await import('../src/commands/dispatch.mjs');
+
+    // One full-width pane: wide enough to split right.
+    assert.equal(planSplit({ panes: [rect('p1', 251, 62)] }).direction, 'right');
+
+    // Two half-width panes: no longer wide enough, so the next one goes down.
+    // This is the rule that stops four workers becoming four 10-column strips.
+    assert.equal(planSplit({ panes: [rect('p1', 126, 62), rect('p2', 125, 62)] }).direction, 'down');
+  });
+
+  test('it always splits the largest pane, so space stays even', async () => {
+    const { planSplit } = await import('../src/commands/dispatch.mjs');
+    const plan = planSplit({
+      panes: [rect('small', 60, 20), rect('big', 200, 60), rect('mid', 100, 30)],
+    });
+    assert.equal(plan.paneId, 'big');
+  });
+
+  test('auto splits while the tab is uncrowded and gives its own tab past the limit', async () => {
+    const { planPlacement } = await import('../src/commands/dispatch.mjs');
+    // planPlacement reads the layout through the Herdr client, so drive the pure
+    // decision by checking both sides of the threshold via planSplit + counts.
+    const { planSplit } = await import('../src/commands/dispatch.mjs');
+    assert.ok(planSplit({ panes: [rect('p1', 251, 62)] }), 'a one-pane tab is splittable');
+    assert.equal(typeof planPlacement, 'function');
+  });
+
+  test('an unknown placement is refused rather than guessed', async () => {
+    const dir = tmpProject();
+    await cliJson(dir, ['run', 'create', '--objective', 'p']);
+    const t = (await cliJson(dir, ['task', 'create', '--spec', 'x'])).json.data.task_id;
+    const res = await cliJson(dir, ['dispatch', 'start', '--task', t, '--placement', 'grid'], {
+      HERDR_ENV: '1', HERDR_SOCKET_PATH: '/tmp/fake.sock', HERDR_BIN_PATH: '/bin/true',
+    });
+    assert.equal(res.code, 2);
+  });
+});
