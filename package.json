@@ -1,11 +1,11 @@
 {
   "name": "cbds",
-  "version": "1.6.0",
+  "version": "2.0.0",
   "description": "Reliable multi-agent orchestration for the Herdr herd.",
   "type": "module",
   "bin": { "cbds": "./bin/cbds" },
   "engines": { "node": ">=18.17" },
-  "files": ["bin", "src", "plugin", "herdr-plugin.toml", "SKILL.md", "README.md"],
+  "files": ["bin", "src", "plugin", "skills", "herdr-plugin.toml", "README.md"],
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "cbds": "node ./bin/cbds.mjs"

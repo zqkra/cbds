@@ -208,6 +208,9 @@ export const whoami = {
       ['task', env.task_id ? `${env.task_id}  ${task ? paintState(task.state) : c.dim('(unreadable)')}` : null],
       ['dispatch', env.dispatch_id ? `${env.dispatch_id}  ${dispatch ? paintState(dispatch.state) : c.dim('(unreadable)')}` : null],
       ['authority', dispatch ? (dispatch.authority ? c.green('yes — you may report') : c.red('no — superseded, do NOT report')) : null],
+      ['coordinator', dispatch?.coordinator
+        ? `${dispatch.coordinator.agent_name ?? dispatch.coordinator.pane_id}  ${c.dim('— ask it with `cbds ask`, it will answer')}`
+        : (process.env.CBDS_COORDINATOR ?? null)],
       ['depth', String(env.depth)],
       ['pane', env.pane_id],
       ['store', env.state_dir],

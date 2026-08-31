@@ -13,6 +13,7 @@ import { buildPreamble, sha256, workerEnv, CONTRACT_LEVELS } from '../herdr/prea
 import { buildAgentArgs, launchKinds } from '../herdr/launch.mjs';
 import { openGatesForTask } from './gate.mjs';
 import { distinctiveLabels } from '../core/labels.mjs';
+import { skillInstalledFor, skillKinds } from '../core/skills.mjs';
 import {
   paneSplit, agentStart, agentPrompt, paneLayout, paneGet, paintPane, insideHerdr, callerPane,
   agentKinds, KNOWN_AGENT_KINDS, agentGet, agentWait, paneClose, worktreeCreate, tabCreate,
@@ -96,7 +97,7 @@ export const start = {
     'wait-ready': { type: 'number', default: 0, placeholder: 'ms', describe: 'if the agent starts blocked (e.g. a trust dialog), wait this long for a human to clear it' },
     trust: { type: 'boolean', describe: 'pre-trust --cwd for this agent first, so it cannot stall on a directory-trust dialog' },
     'no-agent': { type: 'boolean', describe: 'create the pane with cbds env but start no agent (bare-shell dispatch)' },
-    contract: { type: 'string', default: 'standard', describe: `how much protocol to inject: ${CONTRACT_LEVELS.join('|')} (the worker pulls the rest with \`cbds contract\`)` },
+    contract: { type: 'string', default: 'auto', describe: `auto | ${CONTRACT_LEVELS.join(' | ')} — auto goes bare when the agent has the cbds skill installed, standard otherwise` },
     'keep-pane-on-failure': { type: 'boolean', describe: 'leave the worker pane open when the launch fails, for debugging' },
     'dry-run': { type: 'boolean', describe: 'print the preamble and plan without touching Herdr' },
   },
@@ -179,14 +180,26 @@ export const start = {
     }
     const cwd = ctx.flags.cwd ?? process.cwd();
 
+    // Record who is waiting, so the worker can be told and so the relationship is
+    // auditable after the fact.
+    const me = callerPane();
+    const coordinator = me.pane_id
+      ? {
+        pane_id: me.pane_id,
+        workspace_id: me.workspace_id ?? null,
+        agent_name: (await agentGet(me.pane_id).catch(() => null))?.name ?? null,
+      }
+      : null;
+
     const dispatch = createDispatch(store, task, {
       pane_id: null, workspace_id: null, tab_id: null,
       agent_name: null, agent_kind: agentKind, cwd,
     }, { retryOf, preambleSha: null, supervised: !ctx.flags.pane });
+    dispatch.coordinator = coordinator;
 
     // Named from the dispatch, so a retry can never collide with a previous
     // attempt's pane that is still holding the old name.
-    const agentName = ctx.flags.name ?? agentNameForDispatch(dispatch.dispatch_id);
+    const agentName = ctx.flags.name ?? agentNameForDispatch(dispatch.dispatch_id, task.title);
     dispatch.target.agent_name = agentName;
 
     // The preamble is shaped for the worker it is going to: a bare shell must exit
@@ -201,7 +214,24 @@ export const start = {
     const workerLabel = labels[siblings.findIndex((t) => t.task_id === task.task_id)]
       ?? truncate(task.title, 24);
 
-    const contractLevel = oneOf(ctx.flags.contract, CONTRACT_LEVELS, 'contract');
+    // The protocol should live in the worker's skill, loaded once per session — not be
+    // re-sent on every dispatch. So auto checks whether this agent kind has the cbds
+    // skill installed: if it does, the dispatch is the task plus one anchor line.
+    let contractLevel = ctx.flags.contract;
+    let contractReason = 'requested';
+    if (contractLevel === 'auto') {
+      if (bareShell) {
+        contractLevel = 'standard'; contractReason = 'bare shell has no skill to rely on';
+      } else if (skillInstalledFor(agentKind)) {
+        contractLevel = 'bare'; contractReason = `${agentKind} has the cbds skill installed`;
+      } else {
+        contractLevel = 'standard';
+        contractReason = skillKinds().includes(agentKind)
+          ? `no cbds skill for ${agentKind} — run: cbds skill install --agent ${agentKind}`
+          : `no known skill dir for ${agentKind}`;
+      }
+    }
+    oneOf(contractLevel, CONTRACT_LEVELS, 'contract');
     const preamble = buildPreamble({
       run, task, dispatch,
       workerKind: bareShell ? 'bare-shell' : 'agent',
@@ -212,11 +242,12 @@ export const start = {
     });
     dispatch.preamble_sha256 = sha256(preamble);
     dispatch.contract = contractLevel;
+    dispatch.contract_reason = contractReason;
 
     if (ctx.flags['dry-run']) {
       say(ctx, c.dim('── dry run: nothing was created ──'));
       say(ctx, preamble);
-      say(ctx, c.dim(`\ncontract: ${contractLevel} (~${Math.round(Buffer.byteLength(preamble) / 4)} tokens injected)`));
+      say(ctx, c.dim(`\ncontract: ${contractLevel} (~${Math.round(Buffer.byteLength(preamble) / 4)} tokens · ${contractReason})`));
       say(ctx, c.dim(`would split ${ctx.flags.direction ?? 'auto'} from ${callerPane().pane_id ?? 'the focused pane'} and start agent kind "${agentKind ?? 'none'}"`));
       // A dry run must leave no trace, so the speculative record is withdrawn.
       supersedeDispatch(store, dispatch, 'dry run');
@@ -224,6 +255,7 @@ export const start = {
         dry_run: true,
         preamble,
         contract: contractLevel,
+        contract_reason: contractReason,
         preamble_tokens_approx: Math.round(Buffer.byteLength(preamble) / 4),
         preamble_sha256: dispatch.preamble_sha256,
         dispatch,
@@ -297,7 +329,7 @@ export const start = {
         paneInfo = got?.pane ?? got;
         if (!paneInfo?.pane_id) throw noHerdr(`pane ${ctx.flags.pane} not found`);
       } else {
-        const env = workerEnv({ run, task, dispatch, stateDir: ctx.stateRoot, depth: depth + 1 });
+        const env = workerEnv({ run, task, dispatch, stateDir: ctx.stateRoot, depth: depth + 1, coordinator });
         const requested = ctx.flags.direction ? 'split' : oneOf(ctx.flags.placement, ['auto', 'split', 'tab'], 'placement');
         placement = await planPlacement({
           placement: requested,
@@ -490,7 +522,8 @@ export const start = {
     say(ctx, `${c.green('dispatched')}  ${c.bold(task.task_id)} ${c.dim('->')} ${c.bold(paneInfo.pane_id)}`);
     say(ctx, kv([
       ['dispatch', dispatch.dispatch_id],
-      ['agent', agentKind ? `${agentKind} (${agentName})` : 'none (bare shell)'],
+      ['agent', agentKind ? `${agentKind} (${c.bold(agentName)})` : 'none (bare shell)'],
+      ['coordinator', coordinator ? (coordinator.agent_name ?? coordinator.pane_id) : c.dim('none recorded')],
       ['pane', paneInfo.pane_id],
       ['attempt', `${dispatch.attempt} of ${task.max_attempts}`],
       ['cwd', workCwd],
@@ -500,7 +533,7 @@ export const start = {
       ['worktree', worktree ? `${c.green(worktree.branch)}  ${c.dim(worktree.checkout_path ?? '')}` : c.dim('current (shared checkout)')],
       ['launch', [ctx.flags.model && `model=${ctx.flags.model}`, ctx.flags.effort && `effort=${ctx.flags.effort}`,
         (ctx.passthrough ?? []).length && `args=${ctx.passthrough.join(' ')}`].filter(Boolean).join('  ') || null],
-      ['contract', `${contractLevel}  ${c.dim(`(~${Math.round(Buffer.byteLength(preamble) / 4)} tokens injected)`)}`],
+      ['contract', `${contractLevel}  ${c.dim(`(~${Math.round(Buffer.byteLength(preamble) / 4)} tokens · ${contractReason})`)}`],
       ['preamble', `sha256:${dispatch.preamble_sha256.slice(0, 16)}`],
     ]));
     if (bareShell) {
@@ -518,6 +551,7 @@ export const start = {
       placement,
       injected,
       contract: contractLevel,
+      contract_reason: contractReason,
       preamble_tokens_approx: Math.round(Buffer.byteLength(preamble) / 4),
       preamble_sha256: dispatch.preamble_sha256,
     });

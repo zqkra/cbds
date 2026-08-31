@@ -1,6 +1,6 @@
 import { emit, say, kv, table, c, duration, truncate } from '../core/output.mjs';
 import { listRuns, listTasks, listDispatches } from '../core/model.mjs';
-import { scanInbox, scanRejected, readCursor } from '../core/inbox.mjs';
+import { scanInbox, scanRejected, scanOutbox, readCursor, messageType } from '../core/inbox.mjs';
 import { readActiveRunId } from '../core/context.mjs';
 import { insideHerdr, callerPane, herdrBin } from '../herdr/client.mjs';
 
@@ -61,15 +61,28 @@ export const status = {
       const tasks = listTasks(store, run.run_id);
       const dispatches = listDispatches(store, run.run_id);
       const cursor = readCursor(R);
-      const reports = scanInbox(R);
+      const inbox = scanInbox(R);
+      const reports = inbox.filter((m) => messageType(m) === 'report');
+
+      // An unanswered question is the worst silent stall cbds can produce: a worker
+      // sits blocked inside `ask` until its timeout while everything looks healthy.
+      // It has to be impossible to miss.
+      const answered = new Set(scanOutbox(R)
+        .filter((m) => messageType(m) === 'reply')
+        .map((m) => m.in_reply_to));
+      const openQuestions = inbox
+        .filter((m) => messageType(m) === 'question' && !answered.has(m.report_id));
+
       return {
         run_id: run.run_id,
         objective: run.objective,
         tasks: tasks.length,
         live: dispatches.filter((d) => d.state === 'dispatched'),
-        unacked: reports.filter((r) => r.seq > cursor.acked_seq).length,
+        unacked: inbox.filter((r) => r.seq > cursor.acked_seq).length,
+        reports: reports.length,
         rejected: scanRejected(R).length,
         blocked: tasks.filter((t) => t.state === 'blocked').length,
+        open_questions: openQuestions,
       };
     });
 
@@ -80,6 +93,7 @@ export const status = {
         { header: 'TASKS', get: (d) => String(d.tasks) },
         { header: 'LIVE', get: (d) => (d.live.length ? c.yellow(String(d.live.length)) : c.dim('0')) },
         { header: 'UNACKED', get: (d) => (d.unacked ? c.green(String(d.unacked)) : c.dim('0')) },
+        { header: 'ASKING', get: (d) => (d.open_questions.length ? c.red(String(d.open_questions.length)) : c.dim('0')) },
         { header: 'BLOCKED', get: (d) => (d.blocked ? c.magenta(String(d.blocked)) : c.dim('0')) },
         { header: 'REJECTED', get: (d) => (d.rejected ? c.red(String(d.rejected)) : c.dim('0')) },
         { header: 'OBJECTIVE', get: (d) => truncate(d.objective, 40) },
@@ -95,6 +109,16 @@ export const status = {
           { header: 'RUNNING', get: (d) => duration(Date.now() - new Date(d.started_at).getTime()) },
           { header: 'TASK', get: (d) => d.task_id },
         ]));
+      }
+
+      // Questions come before anything else: someone is holding right now.
+      const asking = detail.flatMap((d) => d.open_questions);
+      if (asking.length) {
+        say(ctx, c.red(`\n  ${asking.length} worker(s) are BLOCKED waiting on you:`));
+        for (const q of asking) {
+          say(ctx, `    ${c.bold(q.report_id)}  ${truncate(q.question ?? q.subject ?? '', 56)}`);
+          say(ctx, c.dim(`      cbds reply --id ${q.report_id} --body "<answer>"`));
+        }
       }
 
       const unacked = detail.reduce((a, d) => a + d.unacked, 0);

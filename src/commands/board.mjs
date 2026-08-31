@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { emit, say, table, c, paintState, relTime, duration, truncate } from '../core/output.mjs';
 import { listRuns, listTasks, listDispatches } from '../core/model.mjs';
-import { scanInbox, scanRejected, readCursor } from '../core/inbox.mjs';
+import { scanInbox, scanRejected, scanOutbox, readCursor, messageType } from '../core/inbox.mjs';
 import { resolveRun, readActiveRunId } from '../core/context.mjs';
 import { readEvents } from '../core/store.mjs';
 import { insideHerdr, callerPane } from '../herdr/client.mjs';
@@ -14,21 +14,25 @@ const snapshot = (store, run) => {
   const dispatches = listDispatches(store, run.run_id);
   const byId = new Map(dispatches.map((d) => [d.dispatch_id, d]));
   const cursor = readCursor(R);
-  const reports = scanInbox(R);
+  const inbox = scanInbox(R);
+  const reports = inbox.filter((m) => messageType(m) === 'report');
+  const answered = new Set(scanOutbox(R).filter((m) => messageType(m) === 'reply').map((m) => m.in_reply_to));
+  const openQuestions = inbox.filter((m) => messageType(m) === 'question' && !answered.has(m.report_id));
   return {
+    openQuestions,
     run,
     tasks: tasks.sort((a, b) => (b.priority - a.priority) || a.created_at.localeCompare(b.created_at)),
     dispatches,
     byId,
     reports,
     rejected: scanRejected(R),
-    unacked: reports.filter((r) => r.seq > cursor.acked_seq),
+    unacked: inbox.filter((r) => r.seq > cursor.acked_seq),
     events: readEvents(R.events, 12),
   };
 };
 
 const render = (snap, { width = process.stdout.columns ?? 100 } = {}) => {
-  const { run, tasks, byId, reports, rejected, unacked } = snap;
+  const { run, tasks, byId, reports, rejected, unacked, openQuestions } = snap;
   const out = [];
   const rule = c.dim('─'.repeat(Math.max(20, Math.min(width - 2, 96))));
 
@@ -40,6 +44,13 @@ const render = (snap, { width = process.stdout.columns ?? 100 } = {}) => {
   const counts = tasks.reduce((a, t) => ({ ...a, [t.state]: (a[t.state] ?? 0) + 1 }), {});
   out.push(`  ${Object.entries(counts).map(([k, v]) => `${paintState(k)} ${c.bold(v)}`).join('   ') || c.dim('no tasks')}`);
   out.push(`  ${c.dim('reports')} ${reports.length} accepted · ${unacked.length} unacked · ${rejected.length ? c.red(`${rejected.length} rejected`) : '0 rejected'}`);
+  if (openQuestions?.length) {
+    out.push('');
+    out.push(c.red(`  ${openQuestions.length} worker(s) BLOCKED waiting on an answer:`));
+    for (const q of openQuestions.slice(0, 4)) {
+      out.push(`    ${c.bold(q.report_id)}  ${truncate(q.question ?? q.subject ?? '', 52)}`);
+    }
+  }
   out.push('');
 
   out.push(table(tasks, [

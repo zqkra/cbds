@@ -56,7 +56,7 @@ const RULE = '━'.repeat(70);
 // tick or two without turning long tasks into heartbeat spam.
 const HEARTBEAT_INTERVAL_MIN = 5;
 
-export const CONTRACT_LEVELS = ['minimal', 'standard', 'full'];
+export const CONTRACT_LEVELS = ['bare', 'minimal', 'standard', 'full'];
 
 /**
  * The rules a worker MUST have to complete correctly. Missing any one of these is a
@@ -127,6 +127,21 @@ export const buildPreamble = ({
   const c = cbdsCommand;
   const id = `task ${task.task_id} · dispatch ${dispatch.dispatch_id} · attempt ${dispatch.attempt}/${task.max_attempts}`;
 
+  /**
+   * bare: the task, then ONE anchor line. Mirrors how herdr-mesh and Plano deliver a
+   * message — the text plus a correlation hook — and relies on the worker already
+   * holding the protocol via its installed cbds skill. Only `dispatch start` in auto
+   * mode picks this, and only after confirming that skill is present for the kind.
+   */
+  if (contract === 'bare') {
+    const who = dispatch.coordinator?.agent_name ?? dispatch.coordinator?.pane_id;
+    return [
+      task.spec,
+      '',
+      `[cbds dispatch${who ? ` from ${who}` : ''} — reply with: ${c} done --outcome succeeded --body "<summary>"]`,
+    ].join('\n');
+  }
+
   if (contract === 'minimal') {
     return [
       `${RULE.slice(0, 40)} cbds worker`,
@@ -143,10 +158,12 @@ export const buildPreamble = ({
   }
 
   if (contract === 'standard') {
+    const who = dispatch.coordinator?.agent_name ?? dispatch.coordinator?.pane_id;
     return [
       RULE,
-      'You are a cbds worker inside Herdr. A coordinator is blocked waiting for your',
-      'report and reaches you only through cbds — no other channel gets back to it.',
+      `You are a cbds worker inside Herdr. ${who ? `Your coordinator is ${who}, and it is` : 'A coordinator is'}`,
+      'blocked waiting for your report. It reaches you only through cbds — no other',
+      'channel gets back to it, and it will answer if you ask.',
       '',
       `  ${id}`,
       '',
@@ -315,7 +332,7 @@ export const sha256 = (text) => createHash('sha256').update(text, 'utf8').digest
  * Environment injected into the worker pane at split time. This is the durable half
  * of the identity contract: `cbds done` needs no arguments because of it.
  */
-export const workerEnv = ({ run, task, dispatch, stateDir, depth }) => ({
+export const workerEnv = ({ run, task, dispatch, stateDir, depth, coordinator = null }) => ({
   CBDS_RUN_ID: run.run_id,
   CBDS_TASK_ID: task.task_id,
   CBDS_DISPATCH_ID: dispatch.dispatch_id,
@@ -323,6 +340,9 @@ export const workerEnv = ({ run, task, dispatch, stateDir, depth }) => ({
   CBDS_ROLE: 'worker',
   CBDS_DEPTH: String(depth),
   CBDS_BIN: 'cbds',
+  // Who is waiting. A worker that knows only "report somehow" cannot address anyone;
+  // this is what makes the relationship mutual rather than one-directional.
+  ...(coordinator?.pane_id ? { CBDS_COORDINATOR: coordinator.agent_name ?? coordinator.pane_id } : {}),
   // The shim dir goes first so `cbds` is a single word in every shell, including fish.
   PATH: workerPath(),
 });

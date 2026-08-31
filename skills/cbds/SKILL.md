@@ -20,15 +20,82 @@ reads race and lose scrollback on the alternate screen; a `DONE` sentinel in the
 transcript is unauthenticated. cbds fixes the receive side with a completion contract:
 the worker writes an authoritative, ID-matched report to disk, and you read it.
 
-## When to use cbds, and when not to
+## The relationship, in one paragraph
 
-Use cbds when **you are waiting for a result**:
+A dispatch creates an obligation in **both** directions. The worker owes exactly one
+report, and the coordinator owes an answer to anything the worker asks. Neither side
+can walk away: a worker that never reports burns the coordinator's whole timeout, and
+a coordinator that never answers leaves a worker blocked inside `ask` until it times
+out — which looks like a healthy system doing nothing. `cbds status` and `cbds board`
+show open questions in red for exactly that reason.
+
+Each side knows who the other is. The worker's pane carries `CBDS_COORDINATOR`, its
+preamble names the coordinator, and `cbds whoami` prints it. The coordinator sees each
+worker by a readable name derived from its task — `fix-the-footer-overlap-vzdn`, not an
+opaque id — which is also how you address it: `cbds say fix-the-footer-overlap-vzdn "…"`.
+
+## Got a cbds dispatch? Start here (worker fast path)
+
+A dispatch usually arrives **bare** — the task, then one anchor line like:
+
+```
+[cbds dispatch m1bh7q… — when done: cbds done --outcome succeeded --body "<summary>"]
+```
+
+That line means a coordinator is blocked waiting on you, and your identity is already
+in this pane's environment. The whole protocol, in four rules:
+
+1. Do the task.
+2. Report **exactly once**, including on failure — never encode failure only in prose:
+   ```bash
+   cbds done --outcome succeeded --subject "<short>" --body "<what you did, found, what remains>"
+   cbds done --outcome failed    --subject "<short>" --body "<why, and what you tried>"
+   cbds done --outcome blocked   --subject "<short>" --question "<exactly what you need>"
+   ```
+3. **Never ask through your own interactive UI** (AskUserQuestion, a TUI confirm, a y/n
+   prompt). The coordinator cannot see it and you will hang forever. Use `cbds ask` for a
+   blocking question, or `--outcome blocked`.
+4. After reporting, stop and idle at your prompt. Do not close the pane.
+
+Unsure whether the dispatch is still live (stale scrollback, a handoff)? `cbds whoami`.
+Need heartbeat / ask / escalate / check? See **Worker** below, or run `cbds contract`.
+
+## First: which verb? (get this wrong and you waste everyone's time)
+
+cbds has **two** halves. Pick before you do anything else.
+
+| You want | Use | What the other agent receives |
+|---|---|---|
+| To say something. A greeting, a question, a heads-up, "run the tests". | `cbds spawn` / `cbds say` | **Exactly your text.** Nothing added. |
+| A structured result you will block on, tracked across retries and crashes | `cbds dispatch start` + `cbds wait` | your text + a short reporting anchor |
+
+```bash
+# Just talk. No run, no task, no contract.
+cbds spawn pi --say "¡Hola! Responde con un saludo y di qué modelo eres."
+cbds say pi "gracias, ya está"
+cbds who                                  # who is running, and who is a cbds worker
+```
+
+**If nobody is blocked waiting on a machine-readable outcome, it is not a dispatch.**
+Wrapping "hola" in a completion contract is the classic misuse: the greeting is 8
+tokens and the contract is not, and no coordinator is waiting on a report.
+
+`cbds say` also addresses a live worker by **task or dispatch id**, which raw Herdr
+cannot do — it knows panes, not what a pane is working on:
+
+```bash
+cbds say tsk_m1a9x… "el diseño cambió, usa el componente compartido"
+```
+
+## When to use the dispatch half, and when not to
+
+Use it when **you are waiting for a result**:
 
 - "supervise", "monitor", "wait for", "track completion", "collect results"
 - splitting work across several agents and reporting back
 - anything with a dependency order between pieces of work
 
-Do **not** use cbds for a full handoff — "hand this off", "give this to another agent",
+Do **not** use the dispatch half for a full handoff — "hand this off", "give this to another agent",
 "open a pane and run the tests". Those transfer ownership; nobody is waiting. Use the
 plain `herdr` skill: `herdr pane split` + `herdr agent start` + `herdr agent prompt`.
 Creating a task and dispatch for a handoff records coordination state that no one will
@@ -43,6 +110,15 @@ cbds status          # role, Herdr connectivity, live runs, waiting reports — 
 `cbds status` is the first thing to run in any cbds session. It answers "what am I?" and
 "what is live?" and tells you the next command. If it says the store is not initialised,
 create a run.
+
+```bash
+cbds skill status    # which agent kinds have this skill installed
+```
+
+Install it once per machine — `cbds skill install` — and every dispatch to those kinds
+goes **bare** (~25 tokens of protocol) because the worker already holds the rules. This
+is how Herdr's own mesh works too: the receiver has the skill, the message is just the
+message.
 
 `cbds dispatch start` needs a running Herdr session. Everything else — `done`, `wait`,
 `report`, `task`, `board` — is pure filesystem and works with Herdr down.
@@ -61,6 +137,11 @@ cbds wait --task <task_id> --timeout 900000
 cbds release <dispatch_id>
 ```
 
+Say what the work is, not who you are. cbds already tells the worker it is a worker,
+who its coordinator is, and how to report — writing "you are a worker, I am the
+orchestrator, reply to me" into the spec spends tokens repeating what the preamble and
+the worker's own skill already say. Put the **task** in the spec, in full.
+
 Create the run and **every independent task first**, then start **all** independent
 workers, and only then start waiting. Waiting after each dispatch serialises work that
 should be parallel.
@@ -74,116 +155,31 @@ cbds dispatch start --task $B --agent codex  --json
 cbds wait --all --timeout 900000 --json      # both, in one blocking call
 ```
 
-### Right-sizing the contract (do not send a wall of protocol for a one-line task)
+### How much protocol travels with a dispatch
 
-Every dispatch injects a preamble teaching the worker how to report. How much of the
-protocol travels is your call:
+The protocol lives in the worker's **skill**, loaded once per session — not in every
+dispatch. `--contract auto` (the default) checks whether the target agent kind has the
+cbds skill installed:
 
-| `--contract` | ~tokens | Use it for |
-|---|---|---|
-| `minimal` | ~200 | trivial work: a greeting, a one-line check, a connectivity test |
-| `standard` *(default)* | ~380 | almost everything |
-| `full` | ~1100 | long autonomous work where you want heartbeats, `ask` and `escalate` used properly |
+| installed? | contract sent | ~tokens | what the worker gets |
+|---|---|---|---|
+| yes | `bare` | ~25 | the task + one anchor line with the reply hook |
+| no | `standard` | ~380 | the rules a correct report depends on + `cbds contract` pointer |
 
-```bash
-cbds dispatch start --task <id> --agent claude --contract minimal
-```
-
-**Nothing is lost by going compact.** Every level carries the rules a correct report
-depends on — the three outcomes, exactly-once, never-use-your-own-UI, stop-after —
-and points the worker at `cbds contract`, which prints the full protocol on demand.
-The optional verbs are *pulled*, not pushed.
-
-Rule of thumb: if the task spec is shorter than the protocol, the protocol is too big.
-A one-line task under `full` is ~178x more protocol than work.
-
-### Where the workers go on screen
-
-cbds places workers itself, so you do not have to think about it:
-
-- while the coordinator's tab holds fewer than **4** panes, the next worker **splits
-  into it**, always cutting the largest pane and picking the direction from its aspect
-  ratio — so 4 workers land as a 2x2 grid, not four unreadable columns;
-- past that, each worker gets **its own tab**.
-
-Tabs are labelled with what makes that task *different* from its siblings, not with a
-raw truncation: a shared prefix and any word most siblings repeat are dropped, cuts
-land on word boundaries, and colliding labels are widened until they separate. Thirty
-tabs reading "Dolly Parton's Fun…" are decoration; "FINAL GOODBYE…", "Family Cry At…",
-"Sister Stella…" are an overview.
+So the single most effective thing you can do for token cost is:
 
 ```bash
-cbds dispatch start --task <id> --agent claude                     # auto (default)
-cbds dispatch start --task <id> --agent claude --placement tab     # always its own tab
-cbds dispatch start --task <id> --agent claude --max-per-tab 2     # crowd less
+cbds skill status                       # who is missing it?
+cbds skill install                      # all known kinds + the universal store
+cbds skill install --agent pi,grok      # or just these
 ```
 
-Only override this if the user asks. Forcing `--placement split` for a wave of eight
-workers is how you get a tab of 10-character strips nobody can read.
+Agents load skills at **session start**: a worker already running does not see a fresh
+install until it restarts. Other agents: `npx skills add zqkra/cbds --skill cbds -g`.
 
-### Parallel work on one repo: isolate it
-
-**Two workers dispatched into the same checkout edit the same files and clobber each
-other.** cbds does not detect that for you — you prevent it:
-
-```bash
-cbds dispatch start --task <id> --agent claude --worktree new
-cbds dispatch start --task <id> --agent codex  --worktree new --branch feat/billing --base origin/main
-```
-
-`--worktree new` creates a real git worktree (Herdr puts it under
-`~/.herdr/worktrees/<repo>/<branch>`, default branch `cbds/<task>`) and lands the
-worker inside it. Default is `current`, which shares your checkout.
-
-**Rule:** if two live dispatches would touch the same files, they need separate
-worktrees. Same-file work that must stay in your checkout has to be serialised with
-`--deps` instead.
-
-Cleanup:
-
-```bash
-cbds release <dispatch_id> --remove-worktree     # only after a succeeded outcome
-```
-
-Release refuses to delete the worktree of a failed attempt without `--force`, because
-that destroys the evidence and any uncommitted work in it.
-
-### Decision gates: park a task until you decide
-
-A gate is the mirror of `ask`. `ask` is worker-initiated mid-task; a gate is
-**coordinator-initiated before the work starts** — it is how a plan says "this branch
-is undecided, do not dispatch it yet".
-
-```bash
-cbds gate create --task <id> --question "shared component or page-only?" --options "shared,page-only"
-# the task goes `blocked`, and dispatch start now REFUSES it (exit 7, task_gated)
-
-cbds gate list --state open
-cbds gate resolve <gate_id> --resolution shared
-# the task returns to `ready` once EVERY open gate on it is resolved
-```
-
-Use this instead of holding the decision in your own head: your context can be
-compacted or your session can die, and the gate survives both.
-
-The resolution is **not** auto-injected into the worker. If the decision changes what
-the worker should do, put it in the spec before dispatching:
-
-```bash
-cbds task update <id> --spec "<original spec>  Decision: use the shared component."
-```
-
-### Letting a worker dispatch its own sub-workers
-
-Nesting is capped at 1 generation by default, so a worker's `dispatch start` fails
-with `nested_depth_exceeded`. For a large plan with a sub-coordinator:
-
-```bash
-cbds dispatch start --task <id> --agent claude --max-depth 2 --contract full
-```
-
-`--contract full` matters here: the sub-dispatch instructions only appear in the full
-contract, and only when nesting is actually allowed.
+Override when you must: `--contract bare | minimal | standard | full`. `full` (~1100)
+is for long autonomous work where you want heartbeat / ask / escalate spelled out
+inline. Nothing is lost by going small — `cbds contract` prints everything on demand.
 
 ### Choosing the model and effort per worker
 
@@ -274,6 +270,24 @@ cbds wait --dispatch <dispatch_id> --timeout 60000 # one attempt
 cbds wait --timeout 900000 --all                   # every live dispatch in the run
 cbds wait --timeout 1000                           # drain reports already on disk
 ```
+
+### Your side of the bargain: answer them
+
+You are not only waiting for reports. While workers run, they can ask you things, and
+**an unanswered question is a stalled worker**. Check it whenever you look at state:
+
+```bash
+cbds status          # open questions are printed in red, with the exact reply command
+```
+
+```
+2 worker(s) are BLOCKED waiting on you:
+  rpt_m1a9x…  shared component or page-only?
+    cbds reply --id rpt_m1a9x… --body "<answer>"
+```
+
+If you are going away, answer or cancel first. Leaving a question open is the one
+failure mode that looks like success from the outside.
 
 ### Answering workers mid-flight
 
@@ -470,7 +484,7 @@ new run does not reset the depth — it is counted from your pane's `CBDS_DEPTH`
 | 8 | worker vanished | the pane died before reporting — retry the attempt |
 | 9 | contract undelivered | the agent started but was blocked at a dialog, so it never received the task. The dispatch is NOT live. |
 
-## Bare-shell dispatch
+## Shell-only dispatch (`--no-agent`)
 
 To track work in a pane with no agent — a script, or a human:
 

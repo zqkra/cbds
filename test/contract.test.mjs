@@ -233,9 +233,9 @@ describe('herdr independence', () => {
     const dir = tmpProject();
     await cliJson(dir, ['run', 'create', '--objective', 'dry']);
     const taskId = (await cliJson(dir, ['task', 'create', '--spec', 'x'])).json.data.task_id;
-    const res = await cliJson(dir, ['dispatch', 'start', '--task', taskId, '--dry-run']);
+    // Pin HOME: with no cbds skill installed for the kind, `auto` resolves to `standard`.
+    const res = await cliJson(dir, ['dispatch', 'start', '--task', taskId, '--dry-run'], { HOME: tmpProject() });
     assert.equal(res.code, 0);
-    // The default is the compact `standard` contract.
     const pre = res.json.data.preamble;
     assert.equal(res.json.data.contract, 'standard');
     assert.match(pre, /cbds done --outcome succeeded/);
@@ -248,7 +248,7 @@ describe('herdr independence', () => {
       'the TASK block must come after the contract');
 
     // ...and the full level still carries everything.
-    const full = await cliJson(dir, ['dispatch', 'start', '--task', taskId, '--contract', 'full', '--dry-run']);
+    const full = await cliJson(dir, ['dispatch', 'start', '--task', taskId, '--contract', 'full', '--dry-run'], { HOME: tmpProject() });
     const fp = full.json.data.preamble;
     assert.match(fp, /=== CLI COMMANDS ===/);
     assert.match(fp, /cbds heartbeat --phase/);
@@ -529,7 +529,9 @@ describe('contract levels', () => {
 
   test('every level carries the rules a correct report depends on', async () => {
     const { buildPreamble, CONTRACT_LEVELS } = await import('../src/herdr/preamble.mjs');
-    for (const contract of CONTRACT_LEVELS) {
+    // `bare` is exempt: it leans on the installed skill for these rules, and `auto`
+    // only picks it after confirming that skill is present for the agent kind.
+    for (const contract of CONTRACT_LEVELS.filter((l) => l !== 'bare')) {
       const p = buildPreamble({ ...sample, contract });
       assert.match(p, /done --outcome succeeded/, `${contract}: how to succeed`);
       assert.match(p, /done --outcome failed/, `${contract}: how to fail`);
@@ -541,6 +543,17 @@ describe('contract levels', () => {
       assert.ok(p.lastIndexOf('=== TASK') > p.lastIndexOf('--outcome blocked'),
         `${contract}: TASK must come after the protocol`);
     }
+  });
+
+  test('bare is the task plus one anchor line, nothing else', async () => {
+    const { buildPreamble } = await import('../src/herdr/preamble.mjs');
+    const p = buildPreamble({ ...sample, contract: 'bare' });
+    const lines = p.split('\n').filter(Boolean);
+    assert.equal(lines[0], 'Hola.', 'the task comes first, verbatim');
+    assert.equal(lines.length, 2, `exactly task + anchor, got ${JSON.stringify(lines)}`);
+    assert.match(lines[1], /cbds done --outcome succeeded --body/);
+    assert.ok(Buffer.byteLength(p) - Buffer.byteLength('Hola.') < 140,
+      'the anchor overhead must stay tiny — that is the whole point');
   });
 
   test('compact levels point at the pull command instead of inlining everything', async () => {
@@ -591,8 +604,9 @@ describe('contract levels', () => {
     const dir = tmpProject();
     await cliJson(dir, ['run', 'create', '--objective', 'x']);
     const taskId = (await cliJson(dir, ['task', 'create', '--spec', 'y'])).json.data.task_id;
-    const res = await cliJson(dir, ['dispatch', 'start', '--task', taskId, '--dry-run']);
+    const res = await cliJson(dir, ['dispatch', 'start', '--task', taskId, '--dry-run'], { HOME: tmpProject() });
     assert.equal(res.json.data.dispatch.contract, 'standard');
+    assert.match(res.json.data.contract_reason, /no cbds skill/);
   });
 });
 
@@ -783,5 +797,162 @@ describe('labels', () => {
     const { distinctiveLabels } = await import('../src/core/labels.mjs');
     const out = distinctiveLabels(['Same Task', 'Same Task', 'Other'], 20);
     assert.equal(new Set(out).size, 3);
+  });
+});
+
+
+/* ------------------------------------------- skill-resident protocol -- */
+
+describe('skill-resident protocol', () => {
+  test('status reports missing in a fresh home; install fixes exactly that kind', async () => {
+    const home = tmpProject();
+    const before = await cliJson(process.cwd(), ['skill', 'status', '--agent', 'claude,pi'], { HOME: home });
+    assert.ok(before.json.data.agents.every((a) => a.status === 'missing'));
+
+    const inst = await cliJson(process.cwd(), ['skill', 'install', '--agent', 'claude'], { HOME: home });
+    assert.equal(inst.json.data.agents[0].status, 'installed');
+    assert.ok(fs.existsSync(path.join(home, '.claude', 'skills', 'cbds', 'SKILL.md')));
+
+    const after = await cliJson(process.cwd(), ['skill', 'status', '--agent', 'claude,pi'], { HOME: home });
+    const byKind = Object.fromEntries(after.json.data.agents.map((a) => [a.kind, a.status]));
+    assert.equal(byKind.claude, 'installed');
+    assert.equal(byKind.pi, 'missing', 'installing for one kind must not claim another');
+  });
+
+  test('auto goes bare only for a kind whose skill is installed', async () => {
+    const home = tmpProject();
+    const dir = tmpProject();
+    await cliJson(dir, ['run', 'create', '--objective', 'auto']);
+    const t = (await cliJson(dir, ['task', 'create', '--spec', 'Hola.'])).json.data.task_id;
+    await cliJson(process.cwd(), ['skill', 'install', '--agent', 'claude'], { HOME: home });
+
+    const claude = await cliJson(dir, ['dispatch', 'start', '--task', t, '--agent', 'claude', '--dry-run'], { HOME: home });
+    assert.equal(claude.json.data.contract, 'bare');
+    assert.match(claude.json.data.contract_reason, /skill installed/);
+    assert.ok(claude.json.data.preamble_tokens_approx < 60, 'bare must be a few dozen tokens');
+
+    const pi = await cliJson(dir, ['dispatch', 'start', '--task', t, '--agent', 'pi', '--dry-run'], { HOME: home });
+    assert.equal(pi.json.data.contract, 'standard', 'no skill for pi -> the safe contract');
+    assert.match(pi.json.data.contract_reason, /cbds skill install --agent pi/);
+  });
+
+  test('an unknown skill kind is refused, with the npx fallback in the hint', async () => {
+    const res = await cliJson(process.cwd(), ['skill', 'install', '--agent', 'droid'], { HOME: tmpProject() });
+    assert.equal(res.code, 2);
+    assert.match(res.json.error.hint, /npx skills add/);
+  });
+});
+
+/* ------------------------------------------------------- plain messaging -- */
+
+describe('plain messaging', () => {
+  test('say and spawn need a target and a kind', async () => {
+    const dir = tmpProject();
+    assert.equal((await cliJson(dir, ['say'])).code, 2);
+    assert.equal((await cliJson(dir, ['say', 'pi'])).code, 2, 'a target with no message is a usage error');
+    assert.equal((await cliJson(dir, ['spawn'])).code, 2);
+  });
+
+  test('spawn refuses an unknown agent kind rather than opening a doomed pane', async () => {
+    const res = await cliJson(tmpProject(), ['spawn', 'notanagent'], {
+      HERDR_ENV: '1', HERDR_SOCKET_PATH: '/tmp/fake.sock', HERDR_BIN_PATH: '/bin/true',
+    });
+    assert.equal(res.code, 2);
+  });
+
+  test('they need Herdr, and say so plainly', async () => {
+    const res = await cliJson(tmpProject(), ['say', 'pi', 'hola']);
+    assert.equal(res.code, 6);
+    assert.equal(res.json.error.code, 'herdr_unavailable');
+  });
+
+  test('neither one creates a run, a task or a dispatch', async () => {
+    const dir = tmpProject();
+    await cliJson(dir, ['say', 'pi', 'hola']).catch(() => {});
+    await cliJson(dir, ['spawn', 'pi', '--say', 'hola']).catch(() => {});
+    assert.ok(!fs.existsSync(path.join(dir, '.cbds', 'runs')),
+      'plain messaging must leave no orchestration state behind');
+  });
+});
+
+/* --------------------------------------- orchestrator <-> worker identity -- */
+
+describe('the relationship is mutual', () => {
+  test('agent names lead with the task, so a human can address them', async () => {
+    const { agentNameForDispatch } = await import('../src/core/ids.mjs');
+    const name = agentNameForDispatch('dsp_m1bhr328avzdn', 'Fix the footer overlap on mobile');
+    assert.match(name, /^fix-the-footer-overlap/, `"${name}" must lead with the task`);
+    assert.match(name, /^[a-z][a-z0-9_-]{0,31}$/, "must satisfy Herdr's agent-name rule");
+
+    // Two dispatches of the SAME task must still differ, or the retry collides with
+    // the dead attempt's pane.
+    const a = agentNameForDispatch('dsp_aaaaaaaaaaaaa', 'Same title');
+    const b = agentNameForDispatch('dsp_bbbbbbbbbbbbb', 'Same title');
+    assert.notEqual(a, b);
+
+    // An empty title must not produce a name starting with a digit or a dash.
+    assert.match(agentNameForDispatch('dsp_m1aa1d90wn1mg', ''), /^[a-z]/);
+  });
+
+  test('the worker is told who is waiting, at every contract level', async () => {
+    const { buildPreamble } = await import('../src/herdr/preamble.mjs');
+    const dispatch = {
+      dispatch_id: 'dsp_x', attempt: 1,
+      coordinator: { pane_id: 'w1:p1', agent_name: 'lead' },
+    };
+    const sample = {
+      run: { run_id: 'run_x', objective: 'o' },
+      task: { task_id: 'tsk_x', title: 'T', spec: 'Hola.', max_attempts: 3 },
+      dispatch,
+    };
+    assert.match(buildPreamble({ ...sample, contract: 'bare' }), /from lead/);
+    assert.match(buildPreamble({ ...sample, contract: 'standard' }), /coordinator is lead/);
+
+    // With no coordinator recorded it must still read correctly, not "from undefined".
+    const anon = buildPreamble({
+      ...sample, dispatch: { dispatch_id: 'dsp_x', attempt: 1 }, contract: 'bare',
+    });
+    assert.ok(!anon.includes('undefined'), anon);
+  });
+
+  test('the coordinator identity rides in the worker environment', async () => {
+    const { workerEnv } = await import('../src/herdr/preamble.mjs');
+    const env = workerEnv({
+      run: { run_id: 'run_x' }, task: { task_id: 'tsk_x' }, dispatch: { dispatch_id: 'dsp_x' },
+      stateDir: '/tmp', depth: 1, coordinator: { pane_id: 'w1:p1', agent_name: 'lead' },
+    });
+    assert.equal(env.CBDS_COORDINATOR, 'lead');
+    const none = workerEnv({
+      run: { run_id: 'run_x' }, task: { task_id: 'tsk_x' }, dispatch: { dispatch_id: 'dsp_x' },
+      stateDir: '/tmp', depth: 1,
+    });
+    assert.ok(!('CBDS_COORDINATOR' in none), 'never inject an empty coordinator');
+  });
+});
+
+describe('an unanswered question is never silent', () => {
+  test('status and board surface a worker blocked inside ask', async () => {
+    const dir = tmpProject();
+    const runId = (await cliJson(dir, ['run', 'create', '--objective', 'q'])).json.data.run_id;
+    const taskId = (await cliJson(dir, ['task', 'create', '--spec', 'work'])).json.data.task_id;
+    const dispatchId = await makeDispatch(dir, runId, taskId);
+    const env = { CBDS_RUN_ID: runId, CBDS_TASK_ID: taskId, CBDS_DISPATCH_ID: dispatchId };
+
+    // The worker asks and would now be blocking on the answer.
+    const asked = await cliJson(dir, ['ask', '--question', 'shared or page-only?', '--timeout', '1500'], env);
+    assert.equal(asked.code, 4, 'it times out because nobody answered');
+    const questionId = asked.json.data.question_id;
+
+    const status = await cliJson(dir, ['status']);
+    assert.equal(status.json.data.runs[0].open_questions.length, 1,
+      'a pending question must be visible without digging');
+
+    const board = await cliJson(dir, ['board', '--once']);
+    assert.ok(JSON.stringify(board.json).includes(questionId) || status.json.data.runs[0].open_questions[0].report_id === questionId);
+
+    // Answering clears it.
+    await cliJson(dir, ['reply', '--id', questionId, '--body', 'shared']);
+    const after = await cliJson(dir, ['status']);
+    assert.equal(after.json.data.runs[0].open_questions.length, 0);
   });
 });

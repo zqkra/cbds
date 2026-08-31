@@ -17,8 +17,10 @@ import { heartbeat, ask, escalate, check, reply, send } from './commands/messagi
 import { trust } from './commands/trust.mjs';
 import { contract } from './commands/contract.mjs';
 import * as gateCmd from './commands/gate.mjs';
+import * as skillCmd from './commands/skill.mjs';
+import { talkSay, talkSpawn, who } from './commands/talk.mjs';
 
-export const VERSION = '1.6.0';
+export const VERSION = '2.0.0';
 
 /** Flags accepted by every command. */
 const GLOBAL_FLAGS = {
@@ -64,10 +66,17 @@ const TREE = {
       resolve: gateCmd.resolve, cancel: gateCmd.cancel,
     },
   },
+  skill: {
+    describe: 'install the worker protocol into each agent, so dispatches can go bare',
+    sub: { status: skillCmd.status, install: skillCmd.install },
+  },
   report: {
     describe: 'the run inbox',
     sub: { list: reportCmd.list, show: reportCmd.show, ack: reportCmd.ack },
   },
+  say: talkSay,
+  spawn: talkSpawn,
+  who,
   done,
   wait,
   whoami,

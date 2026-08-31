@@ -39,11 +39,26 @@ export const isId = (value, prefix) =>
 /**
  * Agent name for a dispatch. Must match Herdr's rule: [a-z][a-z0-9_-]{0,31}.
  *
- * Derived from the DISPATCH id, never from the attempt number. Attempt numbers are
- * not unique in practice: `task.attempts` only increments once a dispatch commits, so
- * a launch that failed leaves it unchanged and the retry would ask Herdr for a name
- * the failed attempt's pane is still holding — which fails with agent_start_failed and
- * looks like a mystery. A dispatch id is unique by construction, so this cannot recur.
+ * Readable half + unique half. `cbds-m1bhr328avzdn` is unique but tells a human
+ * nothing in a tab bar or an agent list, and these names are what people address:
+ * `cbds say footer-overlap-3avz "..."`. So the task title leads.
+ *
+ * The unique half is the DISPATCH id, never the attempt number: `task.attempts` only
+ * increments once a dispatch commits, so a failed launch leaves it unchanged and the
+ * retry would ask Herdr for a name the dead attempt's pane is still holding — which
+ * fails with agent_start_failed and looks like a mystery.
  */
-export const agentNameForDispatch = (dispatchId) =>
-  `cbds-${dispatchId.replace(/^dsp_/, '')}`.slice(0, 32);
+export const agentNameForDispatch = (dispatchId, title = '') => {
+  const unique = dispatchId.replace(/^dsp_/, '').slice(-4);
+  const slug = String(title)
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 26)
+    .replace(/-+$/, '');
+  const base = slug || 'cbds';
+  const name = `${base}-${unique}`;
+  // Herdr requires a leading letter.
+  return (/^[a-z]/.test(name) ? name : `w${name}`).slice(0, 32);
+};

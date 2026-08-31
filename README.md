@@ -33,6 +33,24 @@ multiplexer falls apart:
 The common flaw: **the result lives in the terminal.** A terminal is a rendering surface,
 not a datastore.
 
+## Two verbs, not one
+
+cbds began with only `dispatch`, and a system with one verb makes everything look like
+its verb: asked to have two agents greet each other, it wrapped "hola" in a completion
+contract. Orca and Plano both carry two. cbds does now:
+
+```bash
+# Talk. The other agent receives exactly this text and nothing else.
+cbds spawn pi --say "¡Hola! ¿Qué modelo eres?"
+cbds say tsk_m1a9x… "el diseño cambió, usa el componente compartido"
+
+# Dispatch. You are blocked on a structured, ID-authenticated result.
+cbds dispatch start --task tsk_… --agent claude
+cbds wait --task tsk_… --timeout 900000
+```
+
+If nobody is blocked waiting on a machine-readable outcome, it is not a dispatch.
+
 ## The fix
 
 > **The transcript is a hint. The durable report is the truth.**
@@ -77,6 +95,17 @@ git clone https://github.com/zqkra/cbds
 herdr plugin link "$PWD/cbds"
 ```
 
+**Install the worker skill into your agents** — this is what makes dispatches cheap:
+
+```bash
+cbds skill install                              # claude, codex, opencode, pi, gemini, grok + ~/.agents
+npx skills add zqkra/cbds --skill cbds -g       # alternative, covers more agents
+```
+
+A worker that holds the skill already knows the protocol, so a dispatch to it is the
+task plus one anchor line (~25 tokens). Without it, cbds falls back to a ~380-token
+contract. `cbds skill status` shows who has it.
+
 **Put `cbds` on your PATH** so you can drive it by hand:
 
 ```bash
@@ -117,6 +146,25 @@ cbds done --outcome blocked   --subject "…"     --question "what I need to pro
 It never passes ids — they come from its pane environment.
 
 ---
+
+## The relationship is mutual, and named
+
+A dispatch obliges both sides. The worker owes exactly one report; the coordinator
+owes an answer to anything the worker asks. cbds makes each side visible to the other:
+
+- the worker's pane carries `CBDS_COORDINATOR`, its preamble names the coordinator,
+  and `cbds whoami` prints it
+- workers get readable names from their task — `fix-the-footer-overlap-vzdn` — which
+  is how you address them: `cbds say fix-the-footer-overlap-vzdn "…"`
+- tabs, pane titles and Herdr state labels all use the same distinctive label
+- `cbds status` and `cbds board` print **open questions in red**, with the exact reply
+  command, because a worker blocked inside `ask` looks like a healthy idle system
+
+```
+2 worker(s) are BLOCKED waiting on you:
+  rpt_m1a9x…  shared component or page-only?
+    cbds reply --id rpt_m1a9x… --body "<answer>"
+```
 
 ## Architecture
 
@@ -173,24 +221,28 @@ Dolly Parton's Family C   Family Cry At…
 Dolly Parton's Funeral    Funeral — What Cher…
 ```
 
-### Where cbds deliberately differs: the preamble is sized to the task
+### Where cbds deliberately differs: the protocol lives in the skill, not the dispatch
 
-Orca pushes its full ~1700-token preamble on every dispatch regardless of task size.
-For a one-line task that is ~178x more protocol than work — tokens spent, and a wall
-of process burying the actual instruction.
+Orca re-injects its full ~1700-token preamble on every dispatch. Herdr's own mesh
+does the opposite: the receiver has the skill installed, so a message is just the
+message plus a correlation id. cbds follows the mesh model.
 
-cbds pushes only what a correct report depends on and lets the worker **pull** the
-rest with `cbds contract`:
+`--contract auto` (default) checks whether the target agent kind has the cbds skill
+installed and sends accordingly:
 
-| `--contract` | ~tokens | For |
+| | contract | ~tokens |
 |---|---|---|
-| `minimal` | ~200 | a greeting, a one-line check |
-| `standard` *(default)* | ~380 | almost everything |
-| `full` | ~1100 | long autonomous work using heartbeat / ask / escalate |
+| skill installed | `bare` — task + one anchor line | ~25 |
+| not installed | `standard` — the rules a correct report depends on | ~380 |
+| on request | `minimal` / `full` | ~200 / ~1100 |
 
-Every level carries the three outcomes, exactly-once, the never-use-your-own-UI rule,
-and stop-after-reporting. Nothing is lost by going compact; it is just not shipped on
-every dispatch.
+```
+¡Hola! Responde con un saludo breve e indica qué modelo eres.
+
+[cbds dispatch m1bh7q… — when done: cbds done --outcome succeeded --body "<summary>"]
+```
+
+Nothing is lost by going small: `cbds contract` prints the full protocol on demand.
 
 ### Mapping from Orca
 
@@ -238,6 +290,8 @@ cbds escalate      # pre-completion blocker (worker) — does not settle the tas
 cbds check / send  # coordinator -> worker follow-up mail
 cbds trust         # pre-trust a directory so agents don't stall on a trust dialog
 cbds contract      # the full worker protocol, pulled on demand
+cbds skill status|install   # put the protocol in each agent, so dispatches go bare
+cbds say / spawn / who      # plain messaging: no task, no contract, just the text
 cbds gate create|list|resolve|cancel   # coordinator decisions that block a task
 cbds whoami        # worker self-check: am I really live?
 cbds status        # what am I, what is live
@@ -354,7 +408,7 @@ herdr plugin link "$PWD"
 herdr plugin action invoke dev.cbds.cbds.status
 ```
 
-See [DESIGN.md](DESIGN.md) for the full design: Orca mapping, data model, preamble
+Skill file: [skills/cbds/SKILL.md](skills/cbds/SKILL.md). See [DESIGN.md](DESIGN.md) for the full design: Orca mapping, data model, preamble
 contract, storage layout and the invariants the implementation must hold.
 
 ## License
