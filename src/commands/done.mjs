@@ -8,7 +8,10 @@ import {
 } from '../core/model.mjs';
 import { buildReport, writeReport } from '../core/inbox.mjs';
 import { nowIso, withLock } from '../core/store.mjs';
-import { clearPanePaint, paintPane } from '../herdr/client.mjs';
+import { clearPanePaint, paintPane, agentPrompt } from '../herdr/client.mjs';
+import { someoneIsWaiting } from '../core/waiters.mjs';
+import { listDispatches } from '../core/model.mjs';
+import { truncate } from '../core/output.mjs';
 
 /**
  * The authoritative completion signal.
@@ -39,6 +42,7 @@ export const done = {
     artifact: { type: 'string', multiple: true, placeholder: 'path', describe: 'fuller report on disk, repeatable' },
     question: { type: 'string', describe: 'what you need (use with --outcome blocked)' },
     'next-steps': { type: 'string', describe: 'what should happen next' },
+    notify: { type: 'boolean', default: true, describe: 'if nobody is blocked in `cbds wait`, deliver this report into the coordinator’s pane' },
   },
   async run(ctx) {
     const outcome = oneOf(
@@ -159,15 +163,44 @@ export const done = {
       });
     }
 
+    /* ---- make sure it is actually seen ---- */
+
+    // A report on disk that nobody reads is the same as no report. If the coordinator
+    // is blocked in `cbds wait` it will pick this up in milliseconds, so stay quiet.
+    // If it is not — it ended its turn, or never waited — nothing would ever wake it,
+    // because a CLI cannot push into an agent's context. Herdr can, so use it.
+    let notified = null;
+    if (ctx.flags.notify && dispatch.coordinator?.pane_id && !someoneIsWaiting(R)) {
+      const target = dispatch.coordinator.agent_name ?? dispatch.coordinator.pane_id;
+      const stillRunning = listDispatches(store, run.run_id)
+        .filter((d) => d.state === 'dispatched').length;
+      const notice = [
+        `[cbds] ${dispatch.target?.agent_name ?? dispatch.task_id} → ${outcome}: ${truncate(stored.subject ?? '(no subject)', 70)}`,
+        `${task.task_id} · full report: cbds report show ${stored.report_id}`
+          + (stillRunning ? ` · ${stillRunning} worker(s) still running` : ' · all workers settled'),
+      ].join('\n');
+      try {
+        const res = await agentPrompt({ target, text: notice, wait: false, timeoutMs: 20_000 });
+        notified = res?._allowed ? { delivered: false, reason: res._allowed } : { delivered: true, target };
+      } catch (err) {
+        // Never fail an accepted report because the notice could not be delivered:
+        // the report is already durable and `cbds wait` still returns it.
+        notified = { delivered: false, reason: err.code ?? 'prompt_failed' };
+      }
+    }
+
     say(ctx, `${c.green('report accepted')}  ${c.bold(stored.report_id)}  ${paintState(outcome)}`);
     say(ctx, kv([
       ['task', `${task.task_id} ${c.dim('->')} ${paintState(task.state)}`],
       ['dispatch', `${dispatch.dispatch_id} ${c.dim('->')} settled`],
       ['seq', String(stored.seq)],
+      ['coordinator', notified
+        ? (notified.delivered ? `${c.green('notified')} ${c.dim(notified.target)}` : c.yellow(`not notified (${notified.reason})`))
+        : c.dim('waiting on `cbds wait` — it will pick this up')],
     ]));
     say(ctx, c.dim('\n  the coordinator has been signalled. Stop here and idle at your prompt.'));
 
-    return emit(ctx, { report: stored, task, dispatch });
+    return emit(ctx, { report: stored, task, dispatch, notified });
   },
 };
 

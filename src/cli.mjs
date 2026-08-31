@@ -20,7 +20,7 @@ import * as gateCmd from './commands/gate.mjs';
 import * as skillCmd from './commands/skill.mjs';
 import { talkSay, talkSpawn, who } from './commands/talk.mjs';
 
-export const VERSION = '2.0.1';
+export const VERSION = '2.1.0';
 
 /** Flags accepted by every command. */
 const GLOBAL_FLAGS = {

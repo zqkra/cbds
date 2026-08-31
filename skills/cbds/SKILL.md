@@ -232,6 +232,26 @@ If a human is at the keyboard and you would rather they answer the dialog:
 cbds dispatch start --task <id> --agent claude --wait-ready 120000
 ```
 
+### You still have to wait — but a report will find you either way
+
+`cbds wait` is how you receive. Ending your turn with "I'll wait for their reports"
+receives nothing: a CLI cannot push into your context while you are not running.
+
+cbds covers that case rather than losing the result. When a worker reports and
+**nobody is blocked in `cbds wait`**, the report is delivered straight into the
+coordinator's pane:
+
+```
+[cbds] migracion-0039-sw2h → succeeded: 0039 written, verified, NOT applied
+tsk_m1cqe… · full report: cbds report show rpt_… · 2 worker(s) still running
+```
+
+If you *are* blocked in `wait`, nothing is injected — the wait delivers it, and you
+are not told twice.
+
+So: prefer to block on `cbds wait`; it is faster, ordered and acknowledges properly.
+But if you end your turn, the report reaches you anyway instead of sitting unread.
+
 ### Waiting properly
 
 `--timeout` is mandatory. cbds never waits forever.

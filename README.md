@@ -147,6 +147,25 @@ It never passes ids — they come from its pane environment.
 
 ---
 
+## A report cannot go unread
+
+`cbds wait` is the receive primitive, but a coordinator that ends its turn instead of
+blocking on it would never learn anything: a CLI cannot push into an agent's context.
+Herdr can, so cbds uses it.
+
+When a report is accepted and **nobody is blocked in `cbds wait`**, it is delivered
+into the coordinator's pane:
+
+```
+[cbds] migracion-0039-sw2h → succeeded: 0039 written, verified, NOT applied
+tsk_m1cqe… · full report: cbds report show rpt_… · 2 worker(s) still running
+```
+
+`cbds wait` registers itself while it blocks, so an active waiter suppresses the push —
+you are never told twice. A waiter whose process died is pruned, so a crash cannot
+silence notifications for ever. `--no-notify` opts out, and a failed delivery never
+fails the report: it is already durable on disk.
+
 ## The relationship is mutual, and named
 
 A dispatch obliges both sides. The worker owes exactly one report; the coordinator

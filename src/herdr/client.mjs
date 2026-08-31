@@ -210,7 +210,16 @@ export const agentPrompt = ({ target, text, wait = false, timeoutMs = 120_000 })
   });
 };
 
-export const agentGet = (target) => herdr(['agent', 'get', target], { allow: ['agent_not_found'] });
+/**
+ * `agent get` answers `{type, agent: {...}}`, so the useful fields are one level down.
+ * Unwrapping here once stops every caller reaching for `.name` on the envelope and
+ * silently getting undefined — which is exactly how the coordinator ended up nameless.
+ */
+export const agentGet = async (target) => {
+  const res = await herdr(['agent', 'get', target], { allow: ['agent_not_found'] });
+  if (!res || res._allowed) return null;
+  return res.agent ?? res;
+};
 
 /** Block until the agent settles into one of `until`. Used to let a human clear a startup dialog. */
 export const agentWait = (target, { until = ['idle', 'done'], timeoutMs = 60_000 } = {}) => {

@@ -24,7 +24,11 @@ const targets = (flags) => {
         `known: ${skillKinds().join(', ')}, universal. For other agents: npx skills add zqkra/cbds --skill cbds -g`);
     }
   }
-  return wanted.length ? wanted : [...skillKinds(), 'universal'];
+  // `universal` (~/.agents/skills) is opt-in, not a default. Agents that have their
+  // own skill directory read BOTH, and installing to each produces a duplicate-skill
+  // warning on every start — pi prints a "cbds collision" banner. Cover the specific
+  // dirs; add `--agent universal` deliberately for agents that only read the shared one.
+  return wanted.length ? wanted : skillKinds();
 };
 
 export const status = {

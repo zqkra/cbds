@@ -483,7 +483,7 @@ export const start = {
         try {
           await agentWait(agentName, { until: ['idle', 'done'], timeoutMs: ctx.flags['wait-ready'] });
           const info = await agentGet(agentName);
-          agentReady = (info?.agent ?? info)?.agent_status !== 'blocked';
+          agentReady = info?.agent_status !== 'blocked';
         } catch { /* still blocked; the prompt attempt below decides */ }
       }
 

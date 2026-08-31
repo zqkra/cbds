@@ -7,6 +7,7 @@ import {
 } from '../core/inbox.mjs';
 import { resolveRun, resolveTaskId, resolveDispatchId } from '../core/context.mjs';
 import { watchPaneDeath } from '../herdr/events.mjs';
+import { register as registerWaiter } from '../core/waiters.mjs';
 import { paneAlive } from '../herdr/client.mjs';
 
 /**
@@ -90,6 +91,13 @@ export const wait = {
     const waitAll = Boolean(ctx.flags.all);
     const startedAt = Date.now();
 
+    // Announce that someone is listening. `cbds done` checks this: with a live waiter
+    // it stays quiet and lets the wait deliver, without one it pushes the report into
+    // the coordinator's pane so it cannot go unread.
+    const unregister = registerWaiter(R, scopeLabel);
+    const done = (value) => { unregister(); return value; };
+    process.once('exit', unregister);
+
     /* ---- fast path: is it already on disk? ---- */
 
     const already = scanInbox(R).filter(matches);
@@ -97,12 +105,13 @@ export const wait = {
     const outstanding = () => pending.filter((d) => !settledIds.has(d.dispatch_id));
 
     if (already.length && (!waitAll || outstanding().length === 0)) {
-      return finish(ctx, R, store, run, already, {
+      return done(finish(ctx, R, store, run, already, {
         status: 'found', scopeLabel, elapsed: 0, immediate: true, pending: outstanding(),
-      });
+      }));
     }
 
     if (!pending.length && !already.length) {
+      unregister();
       throw new CbdsError('nothing_to_wait_for', `no live dispatch in ${scopeLabel}`, {
         exit: EXIT.NOT_FOUND,
         hint: 'dispatch a task first with `cbds dispatch start --task <id>`',
@@ -149,9 +158,9 @@ export const wait = {
           collected.push(...result.reports);
           for (const r of result.reports.filter(settles)) settledIds.add(r.dispatch_id);
           if (!waitAll || outstanding().length === 0) {
-            return finish(ctx, R, store, run, collected, {
+            return done(finish(ctx, R, store, run, collected, {
               status: 'found', scopeLabel, elapsed: Date.now() - startedAt, pending: outstanding(),
-            });
+            }));
           }
           continue;   // --all: keep waiting for the rest
         }
@@ -164,9 +173,9 @@ export const wait = {
             collected.push(...late);
             for (const r of late.filter(settles)) settledIds.add(r.dispatch_id);
             if (!waitAll || outstanding().length === 0) {
-              return finish(ctx, R, store, run, collected, {
+              return done(finish(ctx, R, store, run, collected, {
                 status: 'found', scopeLabel, elapsed: Date.now() - startedAt, pending: outstanding(),
-              });
+              }));
             }
             vanished = null;
             continue;
@@ -175,7 +184,7 @@ export const wait = {
             const settled = await reportVanished(ctx, store, run, vanished, collected, Date.now() - startedAt);
             // Only a genuinely spurious event resumes the wait. Everything else — a
             // thrown error, or a --json emission that returns null — is terminal.
-            if (settled !== SPURIOUS) return settled;
+            if (settled !== SPURIOUS) return done(settled);
             vanished = null;
           }
           continue;
@@ -184,6 +193,7 @@ export const wait = {
         break;   // timeout
       }
     } finally {
+      unregister();
       for (const w of watchers) { try { w.stop(); } catch { /* already stopped */ } }
     }
 

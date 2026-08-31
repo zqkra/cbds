@@ -1,6 +1,7 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { tmpProject, cli, cliJson } from './helpers.mjs';
 
@@ -968,5 +969,61 @@ describe('--trust never aborts a dispatch', () => {
     assert.deepEqual(MANAGED_KINDS, ['claude', 'codex']);
     assert.ok(!MANAGED_KINDS.includes('pi'),
       'pi has no trust gate cbds manages — dispatching to it with --trust must still work');
+  });
+});
+
+/* ------------------------------------------ the report has to reach someone -- */
+
+describe('a report is never left unread', () => {
+  test('wait registers itself, so done knows somebody is listening', async () => {
+    const { register, someoneIsWaiting, liveWaiters } = await import('../src/core/waiters.mjs');
+    const R = { base: tmpProject() };
+    assert.equal(someoneIsWaiting(R), false);
+
+    const stop = register(R, 'task tsk_x');
+    assert.equal(someoneIsWaiting(R), true);
+    assert.equal(liveWaiters(R)[0].scope, 'task tsk_x');
+
+    stop();
+    assert.equal(someoneIsWaiting(R), false, 'a finished wait must stop claiming to listen');
+  });
+
+  test('a waiter whose process died is pruned, not trusted forever', async () => {
+    const { liveWaiters } = await import('../src/core/waiters.mjs');
+    const base = tmpProject();
+    const dir = path.join(base, 'waiters');
+    fs.mkdirSync(dir, { recursive: true });
+    // A pid that cannot exist, on this host.
+    fs.writeFileSync(path.join(dir, `${os.hostname()}-999999999.json`),
+      JSON.stringify({ pid: 999999999, host: os.hostname(), scope: 'stale', at: new Date().toISOString() }));
+
+    assert.equal(liveWaiters({ base }).length, 0,
+      'a dead waiter must not suppress the notification for ever');
+    assert.equal(fs.existsSync(path.join(dir, `${os.hostname()}-999999999.json`)), false, 'and it is cleaned up');
+  });
+
+  test('done reports whether the coordinator was notified', async () => {
+    const dir = tmpProject();
+    const runId = (await cliJson(dir, ['run', 'create', '--objective', 'n'])).json.data.run_id;
+    const taskId = (await cliJson(dir, ['task', 'create', '--spec', 'w'])).json.data.task_id;
+    const dispatchId = await makeDispatch(dir, runId, taskId);
+
+    // The stub Herdr records no coordinator pane, so there is nobody to push to and
+    // the field stays null — the point is that it is reported either way.
+    const res = await cliJson(dir, ['done', '--run', runId, '--task-id', taskId,
+      '--dispatch-id', dispatchId, '--outcome', 'succeeded', '--body', 'b']);
+    assert.equal(res.code, 0);
+    assert.ok('notified' in res.json.data, 'done must say what happened to the notice');
+  });
+
+  test('--no-notify opts out', async () => {
+    const dir = tmpProject();
+    const runId = (await cliJson(dir, ['run', 'create', '--objective', 'n'])).json.data.run_id;
+    const taskId = (await cliJson(dir, ['task', 'create', '--spec', 'w'])).json.data.task_id;
+    const dispatchId = await makeDispatch(dir, runId, taskId);
+    const res = await cliJson(dir, ['done', '--run', runId, '--task-id', taskId,
+      '--dispatch-id', dispatchId, '--outcome', 'succeeded', '--body', 'b', '--no-notify']);
+    assert.equal(res.code, 0);
+    assert.equal(res.json.data.notified, null);
   });
 });
